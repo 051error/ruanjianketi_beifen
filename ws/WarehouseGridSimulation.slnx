@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/Graphics/">
+    <Project Path="Graphics/WarehouseGridSimulation.csproj" />
+  </Folder>
+  <Folder Name="/Skiasharp/">
+    <Project Path="Skiasharp/WarehouseGridSimulation.SkiaSharp.csproj" />
+  </Folder>
+</Solution>

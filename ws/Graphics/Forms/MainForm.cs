@@ -49,7 +49,7 @@ namespace WarehouseGridSimulation
         /// </summary>
         public MainForm()
         {
-            Text = "仓储物流多智能体调度仿真 - 离散栅格与机器人控制";
+            Text = "仓储物流多智能体调度仿真";
             Size = new Size(1180, 800);
             StartPosition = FormStartPosition.CenterScreen;
             MinimumSize = new Size(800, 600);
