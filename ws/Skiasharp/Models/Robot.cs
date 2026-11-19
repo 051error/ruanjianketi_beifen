@@ -1,10 +1,13 @@
-using System;
+﻿using System;
+using System.Collections.Generic;
+using System.Drawing;
 using SkiaSharp;
+using WarehouseGridSimulation.Skia.Algorithms;
 
 namespace WarehouseGridSimulation.Skia.Models
 {
     /// <summary>
-    /// 表示机器人在离散栅格中的四正交朝向。
+    /// 机器人正交朝向枚举。
     /// </summary>
     public enum RobotOrientation
     {
@@ -15,9 +18,35 @@ namespace WarehouseGridSimulation.Skia.Models
     }
 
     /// <summary>
-    /// 表示机器人当前的动作状态。
+    /// 机器人高层状态机状态。
     /// </summary>
-    public enum RobotState
+    public enum RobotNavState
+    {
+        /// <summary>
+        /// 闲置待命状态（允许修改算法与设定参数）。
+        /// </summary>
+        Idle = 0,
+
+        /// <summary>
+        /// 手动移动控制状态（通过键盘或界面按钮进行手动前进或转向）。
+        /// </summary>
+        ManualMoving = 1,
+
+        /// <summary>
+        /// 自动移动导航状态（基于寻路算法规划路径自主导航）。
+        /// </summary>
+        AutoMoving = 2,
+
+        /// <summary>
+        /// 减速制动状态（正在平滑制动至安全栅格）。
+        /// </summary>
+        Braking = 3
+    }
+
+    /// <summary>
+    /// 机器人底层单步物理动作状态。
+    /// </summary>
+    public enum RobotActionState
     {
         Idle = 0,
         Moving = 1,
@@ -25,7 +54,7 @@ namespace WarehouseGridSimulation.Skia.Models
     }
 
     /// <summary>
-    /// 表示离散仓储栅格中运动的单个机器人（AGV），采用 SkiaSharp 进行高质量向量渲染。
+    /// 表示离散仓储栅格中运动的单个机器人（AGV），内置自动寻路状态机与连续直线平滑加减速动力学。
     /// </summary>
     public class Robot
     {
@@ -37,7 +66,17 @@ namespace WarehouseGridSimulation.Skia.Models
         public int TargetGridX { get; set; }
         public int TargetGridY { get; set; }
         public RobotOrientation Orientation { get; set; }
-        public RobotState State { get; private set; }
+
+        public RobotNavState NavState { get; private set; }
+        public RobotActionState ActionState { get; private set; }
+        public RobotActionState State => ActionState;
+
+        public PathAlgorithm CurrentAlgorithm { get; private set; }
+        public Point? NavigationTarget { get; private set; }
+        public List<Point> CurrentPath { get; private set; }
+
+        public event Action<RobotNavState> NavStateChanged;
+        public event Action TargetReached;
 
         public float PositionX { get; private set; }
         public float PositionY { get; private set; }
@@ -46,6 +85,21 @@ namespace WarehouseGridSimulation.Skia.Models
         public float MaxSpeed { get; set; }
         public float Acceleration { get; set; }
         public float CurrentSpeed { get; private set; }
+
+        public float MaxAngularSpeed { get; set; }
+        public float AngularAcceleration { get; set; }
+        public float CurrentAngularVelocity { get; private set; }
+
+        private readonly Queue<Point> _pathQueue = new Queue<Point>();
+
+        private Point _segmentStartGrid;
+        private int _segmentTotalSteps;
+        private int _segmentStepsDequeued;
+
+        private bool _isBrakingToStop;
+        private float _brakeInitialSpeed;
+        private float _brakeTotalTime;
+        private float _brakeDistance;
 
         private float _startPhysX;
         private float _startPhysY;
@@ -56,6 +110,11 @@ namespace WarehouseGridSimulation.Skia.Models
         private float _targetAngle;
         private float _turnElapsed;
         private float _turnDuration;
+        private float _turnTotalAngle;
+        private float _turnAccelTime;
+        private float _turnConstTime;
+        private float _turnPeakSpeed;
+        private float _turnDirectionSign;
 
         private float _moveElapsed;
         private float _totalMoveTime;
@@ -66,21 +125,29 @@ namespace WarehouseGridSimulation.Skia.Models
 
         public Robot(int gridX, int gridY, float cellSizeMeters, RobotOrientation orientation)
         {
-            // 初始化机器人实例并对齐至指定离散网格中心
-            // gridX: 初始网格列索引
-            // gridY: 初始网格行索引
-            // cellSizeMeters: 单个网格物理边长（米）
-            // orientation: 初始正交朝向
+            // 初始化机器人实例、状态机与基础物理位姿。
+            // gridX: 初始网格列索引。
+            // gridY: 初始网格行索引。
+            // cellSizeMeters: 单个网格物理边长（米）。
+            // orientation: 初始正交朝向。
             GridX = gridX;
             GridY = gridY;
             TargetGridX = gridX;
             TargetGridY = gridY;
             Orientation = orientation;
-            State = RobotState.Idle;
+
+            NavState = RobotNavState.Idle;
+            ActionState = RobotActionState.Idle;
+            CurrentAlgorithm = PathAlgorithm.AStar;
+            CurrentPath = new List<Point>();
 
             MaxSpeed = 1.5f;
             Acceleration = 2.0f;
             CurrentSpeed = 0f;
+
+            MaxAngularSpeed = 180f;
+            AngularAcceleration = 360f;
+            CurrentAngularVelocity = 0f;
 
             CurrentAngle = GetBaseAngle(orientation);
             _targetAngle = CurrentAngle;
@@ -95,7 +162,7 @@ namespace WarehouseGridSimulation.Skia.Models
 
         public static float GetBaseAngle(RobotOrientation orientation)
         {
-            // 将正交朝向枚举转换为标准的度数值
+            // 将正交朝向枚举转换为标准的度数值。
             switch (orientation)
             {
                 case RobotOrientation.Right:
@@ -111,12 +178,270 @@ namespace WarehouseGridSimulation.Skia.Models
             }
         }
 
+        public static Point GetDirectionVector(RobotOrientation orientation)
+        {
+            // 将正交朝向枚举转换为二维离散单位步进向量。
+            switch (orientation)
+            {
+                case RobotOrientation.Right:
+                    return new Point(1, 0);
+                case RobotOrientation.Down:
+                    return new Point(0, 1);
+                case RobotOrientation.Left:
+                    return new Point(-1, 0);
+                case RobotOrientation.Up:
+                    return new Point(0, -1);
+                default:
+                    return Point.Empty;
+            }
+        }
+
+        public bool TrySetAlgorithm(PathAlgorithm algorithm)
+        {
+            // 只有在到达目标点处于空闲状态时才允许更改寻路算法。
+            // algorithm: 准备更改采用的目标寻路算法。
+            if (NavState != RobotNavState.Idle)
+            {
+                return false;
+            }
+
+            CurrentAlgorithm = algorithm;
+            return true;
+        }
+
+        public bool SetNavigationTarget(
+            Point newTarget,
+            int gridColumns,
+            int gridRows,
+            float cellSizeMeters,
+            Func<Point, bool> isWalkable = null)
+        {
+            // 设置目标点或在移动状态下随时更换目标点并重新规划导航路径。
+            // newTarget: 用户新指定的目标网格坐标。
+            // gridColumns: 地图网格总列数。
+            // gridRows: 地图网格总行数。
+            // isWalkable: 判定网格是否可通行的回调委托。
+            if (newTarget.X < 0 || newTarget.X >= gridColumns || newTarget.Y < 0 || newTarget.Y >= gridRows)
+            {
+                return false;
+            }
+
+            NavigationTarget = newTarget;
+
+            Point logicalStart;
+            bool wasMoving = (ActionState == RobotActionState.Moving);
+
+            if (wasMoving)
+            {
+                // 若正在直线位移中，以符合最大加速度平滑减速刹停的安全网格为规划起点
+                logicalStart = CalculateSafeStoppingGrid(cellSizeMeters, out int stopStepIndex);
+                RedirectCurrentMoveToNextGrid(logicalStart, cellSizeMeters, stopStepIndex);
+            }
+            else
+            {
+                // 静止或正在原地转弯，直接以当前所在网格为规划起点
+                logicalStart = new Point(GridX, GridY);
+            }
+
+            _pathQueue.Clear();
+            CurrentPath.Clear();
+
+            // 若规划起点恰好为新目标点
+            if (logicalStart == newTarget)
+            {
+                if (wasMoving)
+                {
+                    StopAtNextGrid(cellSizeMeters);
+                }
+                else
+                {
+                    UpdateNavState(RobotNavState.Idle);
+                    TargetReached?.Invoke();
+                }
+                return true;
+            }
+
+            // 以 logicalStart 为起点规划通往 newTarget 的无斜线正交路径
+            List<Point> newPath = PathPlanning.FindPath(logicalStart, newTarget, gridColumns, gridRows, CurrentAlgorithm, isWalkable);
+            if (newPath == null || newPath.Count == 0)
+            {
+                CancelNavigation();
+                return false;
+            }
+
+            if (wasMoving)
+            {
+                for (int i = 1; i < newPath.Count; i++)
+                {
+                    _pathQueue.Enqueue(newPath[i]);
+                }
+
+                CurrentPath = new List<Point>(newPath);
+            }
+            else
+            {
+                for (int i = 1; i < newPath.Count; i++)
+                {
+                    _pathQueue.Enqueue(newPath[i]);
+                }
+                CurrentPath = new List<Point>(newPath);
+            }
+
+            UpdateNavState(RobotNavState.AutoMoving);
+
+            if (ActionState == RobotActionState.Idle)
+            {
+                StepNavigation(gridColumns, gridRows, cellSizeMeters);
+            }
+
+            return true;
+        }
+
+        private Point CalculateSafeStoppingGrid(float cellSizeMeters, out int stopStepIndex)
+        {
+            // 根据当前速度与设定加速度上限计算平滑制动停下所需的最小网格位置。
+            // stopStepIndex: 相对于当前直线段起点的安全步数输出。
+            Point dir = GetDirectionVector(Orientation);
+
+            float currentDist = 0f;
+            if (_moveDistanceMeters > 0.0001f)
+            {
+                float dx = PositionX - _startPhysX;
+                float dy = PositionY - _startPhysY;
+                currentDist = (float)Math.Sqrt(dx * dx + dy * dy);
+            }
+
+            float currentV = Math.Max(0.1f, CurrentSpeed);
+            float safeAccel = Math.Max(0.1f, Acceleration);
+
+            // 依据设定加速度上限 a 计算制动至 0 所需的最小物理位移
+            float minBrakeDist = (currentV * currentV) / (2.0f * safeAccel);
+            float minTargetDist = currentDist + minBrakeDist;
+
+            // 换算为相对于直线起点的栅格步数索引（向上取整，且至少向前走一格）
+            int requiredStep = (int)Math.Ceiling(minTargetDist / cellSizeMeters);
+            stopStepIndex = Math.Max(_segmentStepsDequeued + 1, requiredStep);
+
+            // 不超过当前直线段原本的总步长范围
+            if (stopStepIndex > _segmentTotalSteps)
+            {
+                stopStepIndex = _segmentTotalSteps;
+            }
+
+            return new Point(
+                _segmentStartGrid.X + dir.X * stopStepIndex,
+                _segmentStartGrid.Y + dir.Y * stopStepIndex);
+        }
+
+        private void RedirectCurrentMoveToNextGrid(Point nextGrid, float cellSizeMeters, int stopStepIndex)
+        {
+            // 将当前进行中的直线移动目标截断重定向至下一个安全栅格以承接新规划路径。
+            TargetGridX = nextGrid.X;
+            TargetGridY = nextGrid.Y;
+
+            float targetCenterX = (TargetGridX + 0.5f) * cellSizeMeters;
+            float targetCenterY = (TargetGridY + 0.5f) * cellSizeMeters;
+
+            _startPhysX = PositionX;
+            _startPhysY = PositionY;
+            _targetPhysX = targetCenterX;
+            _targetPhysY = targetCenterY;
+
+            float remainDist = (float)Math.Sqrt(
+                (targetCenterX - PositionX) * (targetCenterX - PositionX) +
+                (targetCenterY - PositionY) * (targetCenterY - PositionY));
+
+            _moveDistanceMeters = Math.Max(0.005f, remainDist);
+            _isBrakingToStop = true;
+            _brakeInitialSpeed = Math.Max(0.2f, CurrentSpeed);
+            _brakeDistance = _moveDistanceMeters;
+            _brakeTotalTime = (2.0f * _brakeDistance) / _brakeInitialSpeed;
+            _moveElapsed = 0f;
+
+            _segmentTotalSteps = stopStepIndex;
+        }
+
+        public void StopAtNextGrid(float cellSizeMeters)
+        {
+            // 在按下停止时以不超过设定加速度的平滑减速度在安全栅格处停下。
+            _pathQueue.Clear();
+            CurrentPath.Clear();
+            NavigationTarget = null;
+
+            if (ActionState != RobotActionState.Moving)
+            {
+                UpdateNavState(RobotNavState.Idle);
+                return;
+            }
+
+            Point safeStopGrid = CalculateSafeStoppingGrid(cellSizeMeters, out int stopStepIndex);
+            TargetGridX = safeStopGrid.X;
+            TargetGridY = safeStopGrid.Y;
+
+            float targetCenterX = (TargetGridX + 0.5f) * cellSizeMeters;
+            float targetCenterY = (TargetGridY + 0.5f) * cellSizeMeters;
+
+            _startPhysX = PositionX;
+            _startPhysY = PositionY;
+            _targetPhysX = targetCenterX;
+            _targetPhysY = targetCenterY;
+
+            float remainDist = (float)Math.Sqrt(
+                (targetCenterX - PositionX) * (targetCenterX - PositionX) +
+                (targetCenterY - PositionY) * (targetCenterY - PositionY));
+
+            if (remainDist <= 0.005f)
+            {
+                PositionX = targetCenterX;
+                PositionY = targetCenterY;
+                GridX = TargetGridX;
+                GridY = TargetGridY;
+                CurrentSpeed = 0f;
+                ActionState = RobotActionState.Idle;
+                UpdateNavState(RobotNavState.Idle);
+                return;
+            }
+
+            _isBrakingToStop = true;
+            _brakeInitialSpeed = Math.Max(0.2f, CurrentSpeed);
+            _brakeDistance = remainDist;
+            _brakeTotalTime = (2.0f * _brakeDistance) / _brakeInitialSpeed;
+            _moveElapsed = 0f;
+            UpdateNavState(RobotNavState.Braking);
+        }
+
+        public void CancelNavigation()
+        {
+            // 取消当前自动导航任务并恢复空闲状态。
+            _pathQueue.Clear();
+            CurrentPath.Clear();
+            NavigationTarget = null;
+
+            if (ActionState == RobotActionState.Moving)
+            {
+                StopAtNextGrid(0.55f);
+            }
+            else
+            {
+                UpdateNavState(RobotNavState.Idle);
+            }
+        }
+
+        private void UpdateNavState(RobotNavState newState)
+        {
+            // 更新高层导航状态机状态并触发状态变更通知事件。
+            // newState: 新的导航状态机状态。
+            if (NavState != newState)
+            {
+                NavState = newState;
+                NavStateChanged?.Invoke(NavState);
+            }
+        }
+
         public bool TryMoveForward(int gridColumns, int gridRows, float cellSizeMeters)
         {
-            // 请求向当前正交朝向前进一格并规划梯形速度曲线
-            // gridColumns: 地图网格总列数
-            // gridRows: 地图网格总行数
-            if (State != RobotState.Idle)
+            // 手动请求向当前正交朝向前进一格。
+            if (ActionState != RobotActionState.Idle)
             {
                 return false;
             }
@@ -145,16 +470,138 @@ namespace WarehouseGridSimulation.Skia.Models
                 return false;
             }
 
-            TargetGridX = nextX;
-            TargetGridY = nextY;
+            _segmentStartGrid = new Point(GridX, GridY);
+            _segmentTotalSteps = 1;
+            _segmentStepsDequeued = 0;
+            _isBrakingToStop = false;
+
+            UpdateNavState(RobotNavState.ManualMoving);
+            return TryStartStraightMove(new Point(nextX, nextY), 1, cellSizeMeters);
+        }
+
+        public bool TryTurnLeft()
+        {
+            // 请求机器人逆时针原地旋转90度。
+            if (ActionState != RobotActionState.Idle)
+            {
+                return false;
+            }
+
+            UpdateNavState(RobotNavState.ManualMoving);
+            RobotOrientation newOrientation = (RobotOrientation)(((int)Orientation - 1 + 4) % 4);
+            StartTurning(newOrientation, -90f);
+            return true;
+        }
+
+        public bool TryTurnRight()
+        {
+            // 请求机器人顺时针原地旋转90度。
+            if (ActionState != RobotActionState.Idle)
+            {
+                return false;
+            }
+
+            UpdateNavState(RobotNavState.ManualMoving);
+            RobotOrientation newOrientation = (RobotOrientation)(((int)Orientation + 1) % 4);
+            StartTurning(newOrientation, 90f);
+            return true;
+        }
+
+        public bool TryTurn180()
+        {
+            // 请求机器人一次性掉头旋转 180 度。
+            if (ActionState != RobotActionState.Idle)
+            {
+                return false;
+            }
+
+            UpdateNavState(RobotNavState.ManualMoving);
+            RobotOrientation newOrientation = (RobotOrientation)(((int)Orientation + 2) % 4);
+            StartTurning(newOrientation, 180f);
+            return true;
+        }
+
+        private void StartTurning(RobotOrientation newOrientation, float deltaAngle)
+        {
+            // 基于设定的角加速度与最大角速度规划二轮驱动机器人的平滑角速度动力学曲线。
+            Orientation = newOrientation;
+            _startAngle = CurrentAngle;
+            _targetAngle = CurrentAngle + deltaAngle;
+            _turnElapsed = 0f;
+
+            _turnTotalAngle = Math.Abs(deltaAngle);
+            _turnDirectionSign = Math.Sign(deltaAngle);
+
+            float safeAlpha = Math.Max(10f, AngularAcceleration);
+            float safeOmegaMax = Math.Max(10f, MaxAngularSpeed);
+
+            // 加速到最大角速度所需的旋转角度 theta_acc = omega^2 / (2 * alpha)
+            float accelAngle = (safeOmegaMax * safeOmegaMax) / (2.0f * safeAlpha);
+
+            if (accelAngle * 2.0f >= _turnTotalAngle)
+            {
+                // 三角形角速度曲线：未达到最大角速度即开始减速，角加速度恒定为设定值
+                _turnPeakSpeed = (float)Math.Sqrt(safeAlpha * _turnTotalAngle);
+                _turnAccelTime = _turnPeakSpeed / safeAlpha;
+                _turnConstTime = 0f;
+                _turnDuration = _turnAccelTime * 2.0f;
+            }
+            else
+            {
+                // 梯形角速度曲线：角加速 -> 最大角速度匀速旋转 -> 角减速
+                _turnPeakSpeed = safeOmegaMax;
+                _turnAccelTime = _turnPeakSpeed / safeAlpha;
+                float constAngle = _turnTotalAngle - accelAngle * 2.0f;
+                _turnConstTime = constAngle / _turnPeakSpeed;
+                _turnDuration = _turnAccelTime * 2.0f + _turnConstTime;
+            }
+
+            ActionState = RobotActionState.Turning;
+        }
+
+        private Point GetStraightLineTarget(Point currentGrid, RobotOrientation orientation, out int straightStepCount)
+        {
+            // 在待走路径队列中探测沿当前朝向连续直行的最大网格数与终点网格。
+            // currentGrid: 当前出发网格。
+            // straightStepCount: 探测到的连续直行步数输出。
+            straightStepCount = 0;
+            Point lastStraightPoint = currentGrid;
+            Point prevPoint = currentGrid;
+
+            foreach (Point pt in _pathQueue)
+            {
+                RobotOrientation stepOri = DetermineOrientation(prevPoint, pt);
+                if (stepOri == orientation)
+                {
+                    straightStepCount++;
+                    lastStraightPoint = pt;
+                    prevPoint = pt;
+                }
+                else
+                {
+                    break;
+                }
+            }
+
+            return lastStraightPoint;
+        }
+
+        private bool TryStartStraightMove(Point endGrid, int steps, float cellSizeMeters)
+        {
+            // 启动跨越连续同向直线的平滑梯形加减速移动。
+            // endGrid: 连续直线移动的目标终点网格。
+            // steps: 连续直行的网格步数。
+            TargetGridX = endGrid.X;
+            TargetGridY = endGrid.Y;
 
             _startPhysX = (GridX + 0.5f) * cellSizeMeters;
             _startPhysY = (GridY + 0.5f) * cellSizeMeters;
             _targetPhysX = (TargetGridX + 0.5f) * cellSizeMeters;
             _targetPhysY = (TargetGridY + 0.5f) * cellSizeMeters;
 
-            _moveDistanceMeters = cellSizeMeters;
+            _moveDistanceMeters = steps * cellSizeMeters;
             _moveElapsed = 0f;
+            _isBrakingToStop = false;
 
             float safeAccel = Math.Max(0.1f, Acceleration);
             float safeMaxSpeed = Math.Max(0.1f, MaxSpeed);
@@ -176,58 +623,95 @@ namespace WarehouseGridSimulation.Skia.Models
                 _totalMoveTime = _accelTime * 2.0f + _constTime;
             }
 
-            State = RobotState.Moving;
+            ActionState = RobotActionState.Moving;
             return true;
         }
 
-        public bool TryTurnLeft()
+        private void StepNavigation(int gridColumns, int gridRows, float cellSizeMeters)
         {
-            // 请求机器人逆时针原地旋转90度
-            if (State != RobotState.Idle)
+            // 探测前方连续直线或旋转需求并推进导航。
+            if (_pathQueue.Count == 0)
             {
-                return false;
+                bool isRealTargetArrival = NavigationTarget.HasValue &&
+                                          GridX == NavigationTarget.Value.X &&
+                                          GridY == NavigationTarget.Value.Y;
+                NavigationTarget = null;
+                CurrentPath.Clear();
+                UpdateNavState(RobotNavState.Idle);
+                if (isRealTargetArrival)
+                {
+                    TargetReached?.Invoke();
+                }
+                return;
             }
 
-            RobotOrientation newOrientation = (RobotOrientation)(((int)Orientation - 1 + 4) % 4);
-            StartTurning(newOrientation, -90f);
-            return true;
-        }
+            Point nextPoint = _pathQueue.Peek();
+            RobotOrientation neededOrientation = DetermineOrientation(new Point(GridX, GridY), nextPoint);
 
-        public bool TryTurnRight()
-        {
-            // 请求机器人顺时针原地旋转90度
-            if (State != RobotState.Idle)
+            if (neededOrientation != Orientation)
             {
-                return false;
+                // 朝向不一致时一次性旋转至目标方向（支持 90 度转弯或 180 度掉头）
+                int diff = ((int)neededOrientation - (int)Orientation + 4) % 4;
+                if (diff == 1)
+                {
+                    StartTurning(neededOrientation, 90f);
+                }
+                else if (diff == 3)
+                {
+                    StartTurning(neededOrientation, -90f);
+                }
+                else if (diff == 2)
+                {
+                    StartTurning(neededOrientation, 180f);
+                }
             }
+            else
+            {
+                // 朝向已一致：探测前方连续同向直线的最大步数，以最大速度匀速行驶
+                Point straightEnd = GetStraightLineTarget(new Point(GridX, GridY), Orientation, out int steps);
+                if (steps <= 0)
+                {
+                    steps = 1;
+                    straightEnd = nextPoint;
+                }
 
-            RobotOrientation newOrientation = (RobotOrientation)(((int)Orientation + 1) % 4);
-            StartTurning(newOrientation, 90f);
-            return true;
+                _segmentStartGrid = new Point(GridX, GridY);
+                _segmentTotalSteps = steps;
+                _segmentStepsDequeued = 0;
+                _isBrakingToStop = false;
+
+                // 保持完整路径供以栅格为单位实时显示，不在起跑瞬间整段出队
+                CurrentPath = new List<Point>(_pathQueue);
+                TryStartStraightMove(straightEnd, steps, cellSizeMeters);
+            }
         }
 
-        private void StartTurning(RobotOrientation newOrientation, float deltaAngle)
+        private static RobotOrientation DetermineOrientation(Point from, Point to)
         {
-            // 设定目标朝向并开启90度角平滑过渡动画
-            // newOrientation: 旋转完成后的目标朝向
-            // deltaAngle: 角度偏移量，负值为左转，正值为右转
-            Orientation = newOrientation;
-            _startAngle = CurrentAngle;
-            _targetAngle = CurrentAngle + deltaAngle;
-            _turnElapsed = 0f;
-            _turnDuration = 0.25f;
-            State = RobotState.Turning;
+            // 计算从源网格节点移动至相邻目标网格节点所需的朝向。
+            // from: 起始相邻网格。
+            // to: 目标相邻网格。
+            if (to.X > from.X) return RobotOrientation.Right;
+            if (to.X < from.X) return RobotOrientation.Left;
+            if (to.Y > from.Y) return RobotOrientation.Down;
+            return RobotOrientation.Up;
         }
 
         public void ResetToGrid(int gridX, int gridY, float cellSizeMeters)
         {
-            // 将机器人瞬移重置回指定网格中心并恢复空闲状态
+            // 将机器人瞬移重置回指定网格中心并清空所有状态。
+            _pathQueue.Clear();
+            CurrentPath.Clear();
+            NavigationTarget = null;
+            _isBrakingToStop = false;
+
             GridX = gridX;
             GridY = gridY;
             TargetGridX = gridX;
             TargetGridY = gridY;
             Orientation = RobotOrientation.Up;
-            State = RobotState.Idle;
+            ActionState = RobotActionState.Idle;
+            UpdateNavState(RobotNavState.Idle);
 
             CurrentSpeed = 0f;
             CurrentAngle = GetBaseAngle(Orientation);
@@ -241,42 +725,150 @@ namespace WarehouseGridSimulation.Skia.Models
             _targetPhysY = PositionY;
         }
 
-        public void Update(float deltaTime, float cellSizeMeters)
+        public void Update(float deltaTime, float cellSizeMeters, int gridColumns = 30, int gridRows = 30)
         {
-            // 根据时间流逝更新机器人的位置插值与转向插值
-            // deltaTime: 自上一帧以来的时间步长（秒）
+            // 根据时间流逝更新机器人的位置插值、转向插值及导航推进。
+            // deltaTime: 自上一帧以来的时间步长（秒）。
             if (deltaTime <= 0f)
             {
                 return;
             }
 
-            if (State == RobotState.Turning)
+            if (ActionState == RobotActionState.Turning)
             {
                 _turnElapsed += deltaTime;
                 if (_turnElapsed >= _turnDuration)
                 {
                     CurrentAngle = GetBaseAngle(Orientation);
                     _targetAngle = CurrentAngle;
-                    State = RobotState.Idle;
+                    CurrentAngularVelocity = 0f;
+                    ActionState = RobotActionState.Idle;
+
+                    if (NavState == RobotNavState.AutoMoving)
+                    {
+                        StepNavigation(gridColumns, gridRows, cellSizeMeters);
+                    }
+                    else
+                    {
+                        UpdateNavState(RobotNavState.Idle);
+                    }
                 }
                 else
                 {
-                    float progress = _turnElapsed / _turnDuration;
-                    float smooth = progress * progress * (3.0f - 2.0f * progress);
-                    CurrentAngle = _startAngle + (_targetAngle - _startAngle) * smooth;
+                    float t = _turnElapsed;
+                    float rotatedAngle = 0f;
+                    float safeAlpha = Math.Max(10f, AngularAcceleration);
+
+                    if (t < _turnAccelTime)
+                    {
+                        // 1. 角加速阶段: 角加速度恒为 safeAlpha，角速度从 0 线性上升
+                        rotatedAngle = 0.5f * safeAlpha * t * t;
+                        CurrentAngularVelocity = safeAlpha * t;
+                    }
+                    else if (t < _turnAccelTime + _turnConstTime)
+                    {
+                        // 2. 匀角速阶段: 保持最大角速度匀速旋转
+                        float accelAngle = 0.5f * safeAlpha * _turnAccelTime * _turnAccelTime;
+                        float constElapsed = t - _turnAccelTime;
+                        rotatedAngle = accelAngle + _turnPeakSpeed * constElapsed;
+                        CurrentAngularVelocity = _turnPeakSpeed;
+                    }
+                    else
+                    {
+                        // 3. 角减速阶段: 恒定角减速，角速度线性归零
+                        float decelElapsed = t - (_turnAccelTime + _turnConstTime);
+                        float remainTime = _turnAccelTime - decelElapsed;
+                        if (remainTime < 0f) remainTime = 0f;
+
+                        float accelAngle = 0.5f * safeAlpha * _turnAccelTime * _turnAccelTime;
+                        float constAngle = _turnPeakSpeed * _turnConstTime;
+                        float decelCovered = (0.5f * safeAlpha * _turnAccelTime * _turnAccelTime) - (0.5f * safeAlpha * remainTime * remainTime);
+
+                        rotatedAngle = accelAngle + constAngle + decelCovered;
+                        CurrentAngularVelocity = safeAlpha * remainTime;
+                    }
+
+                    CurrentAngle = _startAngle + (_turnDirectionSign * rotatedAngle);
                 }
             }
-            else if (State == RobotState.Moving)
+            else if (ActionState == RobotActionState.Moving)
             {
+                CurrentAngularVelocity = 0f;
                 _moveElapsed += deltaTime;
+
+                if (_isBrakingToStop)
+                {
+                    // 在下一个相邻栅格处执行平滑减速刹车
+                    if (_moveElapsed >= _brakeTotalTime)
+                    {
+                        PositionX = _targetPhysX;
+                        PositionY = _targetPhysY;
+                        GridX = TargetGridX;
+                        GridY = TargetGridY;
+                        CurrentSpeed = 0f;
+                        ActionState = RobotActionState.Idle;
+                        _isBrakingToStop = false;
+
+                        if (NavState == RobotNavState.AutoMoving && _pathQueue.Count > 0)
+                        {
+                            StepNavigation(gridColumns, gridRows, cellSizeMeters);
+                        }
+                        else
+                        {
+                            bool isRealTargetArrival = NavigationTarget.HasValue &&
+                                                      GridX == NavigationTarget.Value.X &&
+                                                      GridY == NavigationTarget.Value.Y;
+                            NavigationTarget = null;
+                            UpdateNavState(RobotNavState.Idle);
+                            if (isRealTargetArrival)
+                            {
+                                TargetReached?.Invoke();
+                            }
+                        }
+                    }
+                    else
+                    {
+                        float t = _moveElapsed;
+                        float ratio = (t / _brakeTotalTime);
+                        float s = _brakeInitialSpeed * t - 0.5f * (_brakeInitialSpeed / _brakeTotalTime) * t * t;
+                        if (s > _brakeDistance) s = _brakeDistance;
+                        float moveRatio = (_brakeDistance > 0.0001f) ? (s / _brakeDistance) : 1f;
+
+                        PositionX = _startPhysX + (_targetPhysX - _startPhysX) * moveRatio;
+                        PositionY = _startPhysY + (_targetPhysY - _startPhysY) * moveRatio;
+                        CurrentSpeed = Math.Max(0f, _brakeInitialSpeed * (1f - ratio));
+
+                        GridX = (int)Math.Round((PositionX / cellSizeMeters) - 0.5f);
+                        GridY = (int)Math.Round((PositionY / cellSizeMeters) - 0.5f);
+                    }
+                    return;
+                }
+
                 if (_moveElapsed >= _totalMoveTime)
                 {
+                    // 直线段跑完，将剩余该段的点全部出队
+                    while (_segmentStepsDequeued < _segmentTotalSteps && _pathQueue.Count > 0)
+                    {
+                        _pathQueue.Dequeue();
+                        _segmentStepsDequeued++;
+                    }
+                    CurrentPath = new List<Point>(_pathQueue);
+
                     GridX = TargetGridX;
                     GridY = TargetGridY;
                     PositionX = (GridX + 0.5f) * cellSizeMeters;
                     PositionY = (GridY + 0.5f) * cellSizeMeters;
                     CurrentSpeed = 0f;
-                    State = RobotState.Idle;
+                    ActionState = RobotActionState.Idle;
+
+                    if (NavState == RobotNavState.AutoMoving)
+                    {
+                        StepNavigation(gridColumns, gridRows, cellSizeMeters);
+                    }
+                    else
+                    {
+                        UpdateNavState(RobotNavState.Idle);
+                    }
                 }
                 else
                 {
@@ -314,13 +906,34 @@ namespace WarehouseGridSimulation.Skia.Models
 
                     PositionX = _startPhysX + (_targetPhysX - _startPhysX) * ratio;
                     PositionY = _startPhysY + (_targetPhysY - _startPhysY) * ratio;
+
+                    GridX = (int)Math.Round((PositionX / cellSizeMeters) - 0.5f);
+                    GridY = (int)Math.Round((PositionY / cellSizeMeters) - 0.5f);
+
+                    // 需求2核心：随着物理位移，每穿过一个网格即刻弹出一个路径点，以栅格为单位动态更新路径显示
+                    int passedSteps = (int)Math.Floor((s + 0.001f) / cellSizeMeters);
+                    if (passedSteps > _segmentStepsDequeued)
+                    {
+                        while (_segmentStepsDequeued < passedSteps && _pathQueue.Count > 0)
+                        {
+                            _pathQueue.Dequeue();
+                            _segmentStepsDequeued++;
+                        }
+                        CurrentPath = new List<Point>(_pathQueue);
+                    }
                 }
             }
             else
             {
                 CurrentSpeed = 0f;
+                CurrentAngularVelocity = 0f;
                 PositionX = (GridX + 0.5f) * cellSizeMeters;
                 PositionY = (GridY + 0.5f) * cellSizeMeters;
+
+                if (NavState == RobotNavState.AutoMoving && _pathQueue.Count > 0)
+                {
+                    StepNavigation(gridColumns, gridRows, cellSizeMeters);
+                }
             }
         }
 
@@ -332,12 +945,12 @@ namespace WarehouseGridSimulation.Skia.Models
             float baseCellPixels,
             float cellSizeMeters)
         {
-            // 使用 SkiaSharp 高质量向量渲染机器人底盘、车头箭头与中心枢轴
-            // canvas: Skia 绘图画布
-            // offsetX: 视口 X 轴像素偏移
-            // offsetY: 视口 Y 轴像素偏移
-            // scale: 视口缩放系数
-            // baseCellPixels: 基础网格像素大小
+            // 使用 SkiaSharp 高质量向量渲染机器人底盘、车头箭头与中心枢轴。
+            // canvas: Skia 绘图画布。
+            // offsetX: 视口 X 轴像素偏移。
+            // offsetY: 视口 Y 轴像素偏移。
+            // scale: 视口缩放系数。
+            // baseCellPixels: 基础网格像素大小。
             float pixelsPerMeter = (baseCellPixels * scale) / cellSizeMeters;
             float screenX = offsetX + PositionX * pixelsPerMeter;
             float screenY = offsetY + PositionY * pixelsPerMeter;
@@ -357,7 +970,6 @@ namespace WarehouseGridSimulation.Skia.Models
 
             float cornerRadius = Math.Max(2f, robotPixelWidth * 0.12f);
 
-            // 1. 绘制机器人地面投影阴影
             using (var shadowPaint = new SKPaint
             {
                 Color = new SKColor(0, 0, 0, 50),
@@ -370,7 +982,6 @@ namespace WarehouseGridSimulation.Skia.Models
                 canvas.DrawRoundRect(shadowRect, cornerRadius, cornerRadius, shadowPaint);
             }
 
-            // 2. 绘制 AGV 主体底盘（亮工业黄，带圆角）
             using (var bodyPaint = new SKPaint
             {
                 Color = new SKColor(255, 175, 20),
@@ -381,7 +992,6 @@ namespace WarehouseGridSimulation.Skia.Models
                 canvas.DrawRoundRect(chassisRect, cornerRadius, cornerRadius, bodyPaint);
             }
 
-            // 3. 绘制底盘黑色精细边框
             using (var strokePaint = new SKPaint
             {
                 Color = new SKColor(35, 45, 55),
@@ -393,7 +1003,6 @@ namespace WarehouseGridSimulation.Skia.Models
                 canvas.DrawRoundRect(chassisRect, cornerRadius, cornerRadius, strokePaint);
             }
 
-            // 4. 绘制车头红色方向箭头（指示 X 轴正前方）
             float arrowLen = robotPixelLength * 0.40f;
             float arrowWid = robotPixelWidth * 0.45f;
             using (var arrowPath = new SKPath())
@@ -411,7 +1020,6 @@ namespace WarehouseGridSimulation.Skia.Models
                 canvas.DrawPath(arrowPath, arrowPaint);
             }
 
-            // 5. 绘制中心定位旋转点
             float centerRadius = Math.Max(2f, robotPixelWidth * 0.16f);
             using (var centerPaint = new SKPaint
             {
