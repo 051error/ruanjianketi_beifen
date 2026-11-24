@@ -22,12 +22,16 @@ namespace WarehouseGridSimulation.Skia.Controls
 
         public SkiaCanvasControl()
         {
-            // 初始化控件双缓冲与重绘样式，杜绝画面撕裂和闪烁
+            // 使用自有位图缓冲并避免重复的 WinForms 离屏缓冲
             SetStyle(ControlStyles.AllPaintingInWmPaint |
                      ControlStyles.UserPaint |
-                     ControlStyles.OptimizedDoubleBuffer |
                      ControlStyles.ResizeRedraw, true);
             UpdateStyles();
+        }
+
+        protected override void OnPaintBackground(PaintEventArgs e)
+        {
+            // 使用完整画布绘制覆盖背景，避免重复擦除。
         }
 
         protected override void OnResize(EventArgs e)
@@ -95,8 +99,17 @@ namespace WarehouseGridSimulation.Skia.Controls
                 ImageLockMode.WriteOnly,
                 PixelFormat.Format32bppPArgb);
 
-            _skSurface.ReadPixels(_skImageInfo, data.Scan0, data.Stride, 0, 0);
-            _gdiBackBuffer.UnlockBits(data);
+            try
+            {
+                if (!_skSurface.ReadPixels(_skImageInfo, data.Scan0, data.Stride, 0, 0))
+                {
+                    throw new InvalidOperationException("无法读取 Skia 画布像素。");
+                }
+            }
+            finally
+            {
+                _gdiBackBuffer.UnlockBits(data);
+            }
 
             e.Graphics.DrawImageUnscaled(_gdiBackBuffer, 0, 0);
         }

@@ -18,4 +18,8 @@
     <PackageReference Include="SkiaSharp.NativeAssets.Win32" Version="2.88.9" />
   </ItemGroup>
 
+  <ItemGroup>
+    <ProjectReference Include="..\Core\WarehouseGridSimulation.Core.csproj" />
+  </ItemGroup>
+
 </Project>

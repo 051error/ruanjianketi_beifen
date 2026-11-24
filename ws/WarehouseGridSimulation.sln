@@ -11,6 +11,10 @@ Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Skiasharp", "Skiasharp", "{
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "WarehouseGridSimulation.SkiaSharp", "Skiasharp\WarehouseGridSimulation.SkiaSharp.csproj", "{CCA9A2B8-9910-4868-9390-8CB18EE0062B}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "WarehouseGridSimulation.Core", "Core\WarehouseGridSimulation.Core.csproj", "{D3A15C2E-5511-40D9-A21F-34C69EF00A11}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "WarehouseGridSimulation.Tests", "Tests\WarehouseGridSimulation.Tests.csproj", "{E4B26D3F-6622-41EA-B32A-45D70FE11B22}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -45,6 +49,14 @@ Global
 		{CCA9A2B8-9910-4868-9390-8CB18EE0062B}.Release|x64.Build.0 = Release|Any CPU
 		{CCA9A2B8-9910-4868-9390-8CB18EE0062B}.Release|x86.ActiveCfg = Release|Any CPU
 		{CCA9A2B8-9910-4868-9390-8CB18EE0062B}.Release|x86.Build.0 = Release|Any CPU
+		{D3A15C2E-5511-40D9-A21F-34C69EF00A11}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{D3A15C2E-5511-40D9-A21F-34C69EF00A11}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{D3A15C2E-5511-40D9-A21F-34C69EF00A11}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{D3A15C2E-5511-40D9-A21F-34C69EF00A11}.Release|Any CPU.Build.0 = Release|Any CPU
+		{E4B26D3F-6622-41EA-B32A-45D70FE11B22}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{E4B26D3F-6622-41EA-B32A-45D70FE11B22}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{E4B26D3F-6622-41EA-B32A-45D70FE11B22}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{E4B26D3F-6622-41EA-B32A-45D70FE11B22}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net11.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <RootNamespace>WarehouseGridSimulation.Core</RootNamespace>
+    <AssemblyName>WarehouseGridSimulation.Core</AssemblyName>
+  </PropertyGroup>
+
+</Project>

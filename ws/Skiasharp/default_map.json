@@ -1,0 +1,19 @@
+{
+  "name": "Warehouse30x30CleanMap",
+  "width": 30,
+  "height": 30,
+  "cellSizeMeters": 0.55,
+  "obstacles": [],
+  "stations": [
+    { "id": 1, "name": "上货站-A", "type": "Pick", "x": 2, "y": 2 },
+    { "id": 2, "name": "上货站-B", "type": "Pick", "x": 15, "y": 2 },
+    { "id": 3, "name": "上货站-C", "type": "Pick", "x": 27, "y": 2 },
+    { "id": 4, "name": "卸货站-1", "type": "Drop", "x": 2, "y": 27 },
+    { "id": 5, "name": "卸货站-2", "type": "Drop", "x": 15, "y": 27 },
+    { "id": 6, "name": "卸货站-3", "type": "Drop", "x": 27, "y": 27 },
+    { "id": 7, "name": "待命区-中心", "type": "Waiting", "x": 14, "y": 14 }
+  ],
+  "initialRobots": [
+    { "id": 1, "x": 14, "y": 14, "orientation": "Up" }
+  ]
+}
