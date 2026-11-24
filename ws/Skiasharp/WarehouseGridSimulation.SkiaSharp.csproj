@@ -7,6 +7,10 @@
     <Nullable>disable</Nullable>
     <RootNamespace>WarehouseGridSimulation.Skia</RootNamespace>
     <AssemblyName>WarehouseGridSimulation.SkiaSharp</AssemblyName>
+
+    <!-- 启动耗时优化与分层编译加速配置 -->
+    <TieredCompilation>true</TieredCompilation>
+    <TieredCompilationQuickJit>true</TieredCompilationQuickJit>
   </PropertyGroup>
 
   <ItemGroup>

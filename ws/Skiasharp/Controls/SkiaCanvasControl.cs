@@ -46,6 +46,13 @@ namespace WarehouseGridSimulation.Skia.Controls
                 return;
             }
 
+            // 核心优化：若当前缓冲区尺寸与控件当前宽高一致，避免反复销毁与非托管内存再分配
+            if (_skSurface != null && _gdiBackBuffer != null &&
+                _skImageInfo.Width == Width && _skImageInfo.Height == Height)
+            {
+                return;
+            }
+
             if (_skSurface != null)
             {
                 _skSurface.Dispose();

@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Drawing;
 using SkiaSharp;
@@ -90,11 +90,25 @@ namespace WarehouseGridSimulation.Skia.Models
         public float AngularAcceleration { get; set; }
         public float CurrentAngularVelocity { get; private set; }
 
+        /// <summary>
+        /// 外部调度接管开关。为 true 时机器人跑完一段后不再自行续接下一段，
+        /// 必须停在栅格中心等待调度器授予受控区域通行许可，杜绝绕过许可闸门。
+        /// </summary>
+        public bool ExternalScheduling { get; set; }
+
+        /// <summary>
+        /// 是否已停在栅格中心等待调度器授予下一段通行许可。
+        /// </summary>
+        public bool IsAwaitingPermission { get; private set; }
+
         private readonly Queue<Point> _pathQueue = new Queue<Point>();
 
         private Point _segmentStartGrid;
         private int _segmentTotalSteps;
         private int _segmentStepsDequeued;
+
+        // 调度器本次授权的连续直行格数上限（0 表示不限，用于单机模式）
+        private int _grantedStepLimit;
 
         private bool _isBrakingToStop;
         private float _brakeInitialSpeed;
@@ -297,6 +311,58 @@ namespace WarehouseGridSimulation.Skia.Models
             return true;
         }
 
+        public bool AssignPlannedPath(
+            List<Point> path,
+            Point targetGrid,
+            float cellSizeMeters,
+            int gridColumns = 30,
+            int gridRows = 30)
+        {
+            // 为机器人直接分配多机调度算法预先规划好的无冲突正交路径并启动导航。
+            // path: 多机调度算法生成的离散栅格时空路径序列。
+            // targetGrid: 机器人的目标网格点。
+            // cellSizeMeters: 单个网格物理边长（米）。
+            // gridColumns: 地图网格总列数。
+            // gridRows: 地图网格总行数。
+            if (path == null || path.Count == 0)
+            {
+                return false;
+            }
+
+            NavigationTarget = targetGrid;
+            _pathQueue.Clear();
+            CurrentPath.Clear();
+
+            // 若起点已经处于终点
+            if (path.Count == 1 && path[0] == targetGrid)
+            {
+                UpdateNavState(RobotNavState.Idle);
+                TargetReached?.Invoke();
+                return true;
+            }
+
+            // 将后续待行进的时空栅格节点依次入队
+            for (int i = 1; i < path.Count; i++)
+            {
+                _pathQueue.Enqueue(path[i]);
+            }
+            CurrentPath = new List<Point>(path);
+
+            UpdateNavState(RobotNavState.AutoMoving);
+
+            // 外部调度接管：仅装载路径并挂起，由调度器授予首个受控区域许可后再起步
+            if (ExternalScheduling)
+            {
+                IsAwaitingPermission = true;
+            }
+            else if (ActionState == RobotActionState.Idle)
+            {
+                StepNavigation(gridColumns, gridRows, cellSizeMeters);
+            }
+
+            return true;
+        }
+
         private Point CalculateSafeStoppingGrid(float cellSizeMeters, out int stopStepIndex)
         {
             // 根据当前速度与设定加速度上限计算平滑制动停下所需的最小网格位置。
@@ -367,6 +433,7 @@ namespace WarehouseGridSimulation.Skia.Models
             _pathQueue.Clear();
             CurrentPath.Clear();
             NavigationTarget = null;
+            IsAwaitingPermission = false;
 
             if (ActionState != RobotActionState.Moving)
             {
@@ -561,21 +628,30 @@ namespace WarehouseGridSimulation.Skia.Models
 
         private Point GetStraightLineTarget(Point currentGrid, RobotOrientation orientation, out int straightStepCount)
         {
-            // 在待走路径队列中探测沿当前朝向连续直行的最大网格数与终点网格。
-            // currentGrid: 当前出发网格。
-            // straightStepCount: 探测到的连续直行步数输出。
+            // 探测沿当前朝向可连续直行的最大网格数与终点网格（连续直行合批以获得完整梯形速度曲线）。
             straightStepCount = 0;
             Point lastStraightPoint = currentGrid;
             Point prevPoint = currentGrid;
 
             foreach (Point pt in _pathQueue)
             {
+                if (pt == prevPoint)
+                {
+                    continue;
+                }
+
                 RobotOrientation stepOri = DetermineOrientation(prevPoint, pt);
                 if (stepOri == orientation)
                 {
                     straightStepCount++;
                     lastStraightPoint = pt;
                     prevPoint = pt;
+
+                    // 外部调度接管时只走已获预约的前缀格数，绝不驶入未预约栅格
+                    if (ExternalScheduling && _grantedStepLimit > 0 && straightStepCount >= _grantedStepLimit)
+                    {
+                        break;
+                    }
                 }
                 else
                 {
@@ -586,20 +662,96 @@ namespace WarehouseGridSimulation.Skia.Models
             return lastStraightPoint;
         }
 
+        /// <summary>
+        /// 预览下一段动作涉及的全部受控栅格，供调度器一次性原子预约。
+        /// 原地转向段返回当前所在格（转向时车身扫掠范围会略微探入相邻格，必须独占本格）；
+        /// 直行段返回该段将连续驶入的全部栅格。空列表表示已无待行进路径。
+        /// </summary>
+        public List<Point> PeekSegmentZones()
+        {
+            List<Point> zones = new List<Point>();
+            Point current = new Point(GridX, GridY);
+
+            Point next = Point.Empty;
+            bool hasNext = false;
+            foreach (Point pt in _pathQueue)
+            {
+                if (pt != current)
+                {
+                    next = pt;
+                    hasNext = true;
+                    break;
+                }
+            }
+
+            if (!hasNext)
+            {
+                return zones;
+            }
+
+            // 需要先转向：原地旋转不驶入新栅格，但必须独占当前格
+            if (DetermineOrientation(current, next) != Orientation)
+            {
+                zones.Add(current);
+                return zones;
+            }
+
+            Point prev = current;
+            foreach (Point pt in _pathQueue)
+            {
+                if (pt == prev)
+                {
+                    continue;
+                }
+                if (DetermineOrientation(prev, pt) != Orientation)
+                {
+                    break;
+                }
+                zones.Add(pt);
+                prev = pt;
+            }
+
+            return zones;
+        }
+
+        /// <summary>
+        /// 当前合批直线段的真实起点与终点，供调度器判定哪些前方栅格尚未通过、不可提前释放。
+        /// 直接采用段端点而非实时四舍五入的 GridX/Y，避免车身接近终点时方向向量退化导致误释放。
+        /// </summary>
+        public Point SegmentStartGrid => _segmentStartGrid;
+        public Point SegmentEndGrid => new Point(TargetGridX, TargetGridY);
+
+        /// <summary>
+        /// 由调度器在受控区域预约成功后调用，放行机器人按完整梯形/三角形动力学执行移动。
+        /// grantedSteps: 本次已预约的连续直行格数（0 表示原地转向段或单机模式不限）。
+        /// </summary>
+        public void GrantStepPermission(int gridColumns, int gridRows, float cellSizeMeters, int grantedSteps = 0)
+        {
+            if (!IsAwaitingPermission)
+            {
+                return;
+            }
+
+            IsAwaitingPermission = false;
+            _grantedStepLimit = ExternalScheduling ? grantedSteps : 0;
+            StepNavigation(gridColumns, gridRows, cellSizeMeters);
+        }
+
         private bool TryStartStraightMove(Point endGrid, int steps, float cellSizeMeters)
         {
             // 启动跨越连续同向直线的平滑梯形加减速移动。
-            // endGrid: 连续直线移动的目标终点网格。
-            // steps: 连续直行的网格步数。
-            TargetGridX = endGrid.X;
-            TargetGridY = endGrid.Y;
+            // 核心安全约束：严格依据机器人当前正交朝向推进计算目标网格，从几何根源杜绝对角斜线位移。
+            Point dirVec = GetDirectionVector(Orientation);
+            int safeSteps = Math.Max(1, steps);
+            TargetGridX = GridX + dirVec.X * safeSteps;
+            TargetGridY = GridY + dirVec.Y * safeSteps;
 
             _startPhysX = (GridX + 0.5f) * cellSizeMeters;
             _startPhysY = (GridY + 0.5f) * cellSizeMeters;
             _targetPhysX = (TargetGridX + 0.5f) * cellSizeMeters;
             _targetPhysY = (TargetGridY + 0.5f) * cellSizeMeters;
 
-            _moveDistanceMeters = steps * cellSizeMeters;
+            _moveDistanceMeters = safeSteps * cellSizeMeters;
             _moveElapsed = 0f;
             _isBrakingToStop = false;
 
@@ -645,6 +797,22 @@ namespace WarehouseGridSimulation.Skia.Models
                 return;
             }
 
+            // 过滤并弹出队列头部与当前所在格重叠的点
+            while (_pathQueue.Count > 0 && _pathQueue.Peek().X == GridX && _pathQueue.Peek().Y == GridY)
+            {
+                _pathQueue.Dequeue();
+                CurrentPath = new List<Point>(_pathQueue);
+            }
+
+            if (_pathQueue.Count == 0)
+            {
+                NavigationTarget = null;
+                CurrentPath.Clear();
+                UpdateNavState(RobotNavState.Idle);
+                TargetReached?.Invoke();
+                return;
+            }
+
             Point nextPoint = _pathQueue.Peek();
             RobotOrientation neededOrientation = DetermineOrientation(new Point(GridX, GridY), nextPoint);
 
@@ -686,6 +854,41 @@ namespace WarehouseGridSimulation.Skia.Models
             }
         }
 
+        private void CompleteSegmentAndAwait(int gridColumns, int gridRows, float cellSizeMeters)
+        {
+            // 一段移动结束后的续接决策：外部调度接管时必须挂起等待许可，否则按原有逻辑自行续接。
+            if (ExternalScheduling)
+            {
+                if (_pathQueue.Count > 0)
+                {
+                    IsAwaitingPermission = true;
+                }
+                else
+                {
+                    bool arrived = NavigationTarget.HasValue &&
+                                   GridX == NavigationTarget.Value.X &&
+                                   GridY == NavigationTarget.Value.Y;
+                    NavigationTarget = null;
+                    CurrentPath.Clear();
+                    UpdateNavState(RobotNavState.Idle);
+                    if (arrived)
+                    {
+                        TargetReached?.Invoke();
+                    }
+                }
+                return;
+            }
+
+            if (NavState == RobotNavState.AutoMoving)
+            {
+                StepNavigation(gridColumns, gridRows, cellSizeMeters);
+            }
+            else
+            {
+                UpdateNavState(RobotNavState.Idle);
+            }
+        }
+
         private static RobotOrientation DetermineOrientation(Point from, Point to)
         {
             // 计算从源网格节点移动至相邻目标网格节点所需的朝向。
@@ -704,6 +907,7 @@ namespace WarehouseGridSimulation.Skia.Models
             CurrentPath.Clear();
             NavigationTarget = null;
             _isBrakingToStop = false;
+            IsAwaitingPermission = false;
 
             GridX = gridX;
             GridY = gridY;
@@ -744,14 +948,7 @@ namespace WarehouseGridSimulation.Skia.Models
                     CurrentAngularVelocity = 0f;
                     ActionState = RobotActionState.Idle;
 
-                    if (NavState == RobotNavState.AutoMoving)
-                    {
-                        StepNavigation(gridColumns, gridRows, cellSizeMeters);
-                    }
-                    else
-                    {
-                        UpdateNavState(RobotNavState.Idle);
-                    }
+                    CompleteSegmentAndAwait(gridColumns, gridRows, cellSizeMeters);
                 }
                 else
                 {
@@ -809,7 +1006,20 @@ namespace WarehouseGridSimulation.Skia.Models
                         ActionState = RobotActionState.Idle;
                         _isBrakingToStop = false;
 
-                        if (NavState == RobotNavState.AutoMoving && _pathQueue.Count > 0)
+                        if (ExternalScheduling)
+                        {
+                            if (_pathQueue.Count > 0)
+                            {
+                                IsAwaitingPermission = true;
+                            }
+                            else
+                            {
+                                NavigationTarget = null;
+                                CurrentPath.Clear();
+                                UpdateNavState(RobotNavState.Idle);
+                            }
+                        }
+                        else if (NavState == RobotNavState.AutoMoving && _pathQueue.Count > 0)
                         {
                             StepNavigation(gridColumns, gridRows, cellSizeMeters);
                         }
@@ -861,14 +1071,7 @@ namespace WarehouseGridSimulation.Skia.Models
                     CurrentSpeed = 0f;
                     ActionState = RobotActionState.Idle;
 
-                    if (NavState == RobotNavState.AutoMoving)
-                    {
-                        StepNavigation(gridColumns, gridRows, cellSizeMeters);
-                    }
-                    else
-                    {
-                        UpdateNavState(RobotNavState.Idle);
-                    }
+                    CompleteSegmentAndAwait(gridColumns, gridRows, cellSizeMeters);
                 }
                 else
                 {
@@ -910,7 +1113,8 @@ namespace WarehouseGridSimulation.Skia.Models
                     GridX = (int)Math.Round((PositionX / cellSizeMeters) - 0.5f);
                     GridY = (int)Math.Round((PositionY / cellSizeMeters) - 0.5f);
 
-                    // 需求2核心：随着物理位移，每穿过一个网格即刻弹出一个路径点，以栅格为单位动态更新路径显示
+                    // 随物理位移逐格弹出已通过的路径点，使路径显示与剩余步数实时同步。
+                    // 授权已改为整段原子预约，调度器不再依赖 CurrentPath[0]，故此处出队安全。
                     int passedSteps = (int)Math.Floor((s + 0.001f) / cellSizeMeters);
                     if (passedSteps > _segmentStepsDequeued)
                     {
@@ -930,7 +1134,8 @@ namespace WarehouseGridSimulation.Skia.Models
                 PositionX = (GridX + 0.5f) * cellSizeMeters;
                 PositionY = (GridY + 0.5f) * cellSizeMeters;
 
-                if (NavState == RobotNavState.AutoMoving && _pathQueue.Count > 0)
+                // 外部调度接管时严禁自行续接，必须等待调度器授予通行许可
+                if (!ExternalScheduling && NavState == RobotNavState.AutoMoving && _pathQueue.Count > 0)
                 {
                     StepNavigation(gridColumns, gridRows, cellSizeMeters);
                 }
