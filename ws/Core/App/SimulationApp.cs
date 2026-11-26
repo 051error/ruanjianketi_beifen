@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using WarehouseGridSimulation.Core.Engine;
 using WarehouseGridSimulation.Core.Geometry;
@@ -135,6 +136,82 @@ namespace WarehouseGridSimulation.Core.App
             return Engine?.CancelNavigation(robotId) ?? false;
         }
 
+        public MultiAgentPlanResult PlanMultiAgentPaths(IReadOnlyList<AgentTask> tasks, MultiAgentPlanOptions options = null)
+        {
+            // 通过外观门面调用多机器人协同路径规划算法。
+            // tasks: 各智能体起终点任务列表; options: 可选的多机规划参数。
+            if (Engine == null) return MultiAgentPlanResult.Fail("仿真引擎未就绪");
+            return Engine.PlanMultiAgentPaths(tasks, options);
+        }
+
+        public bool ManualDriveRobot(int robotId, ManualDriveAction action, bool active)
+        {
+            // 向指定编号的机器人下发手动控制长按激活或释放制动信号。
+            // robotId: 受控机器人全局编号; action: 手动驾驶动作类型; active: 控制信号是否处于按下激活状态。
+            var robot = Engine?.GetRobot(robotId);
+            if (robot == null) return false;
+
+            if (active)
+            {
+                var mc = Engine.GetMotionController(robotId);
+                mc?.ClearPath();
+                Engine.ReservationManager.ReleaseRobotReservations(robotId, robot.ConfirmedGrid);
+
+                switch (action)
+                {
+                    case ManualDriveAction.Forward:
+                        if (Math.Abs(robot.AngularVelocity) <= 0.02f)
+                            robot.ExecuteCommand(RobotCommand.MoveForward);
+                        break;
+                    case ManualDriveAction.TurnLeft:
+                        if (robot.LinearVelocity <= robot.Config.SpeedTolerance)
+                            robot.ExecuteCommand(RobotCommand.Rotate(-float.MaxValue));
+                        break;
+                    case ManualDriveAction.TurnRight:
+                        if (robot.LinearVelocity <= robot.Config.SpeedTolerance)
+                            robot.ExecuteCommand(RobotCommand.Rotate(float.MaxValue));
+                        break;
+                }
+
+                if (!Engine.IsRunning || Engine.IsPaused) Engine.Start();
+            }
+            else
+            {
+                robot.ExecuteCommand(RobotCommand.Brake());
+            }
+
+            Engine.PublishSnapshot();
+            return true;
+        }
+
+        public void MaintainManualDrive(int robotId, ManualDriveAction action)
+        {
+            // 在仿真时钟步进周期中维持指定机器人的长按手动动力学推进。
+            var robot = Engine?.GetRobot(robotId);
+            if (robot == null) return;
+
+            var mc = Engine.GetMotionController(robotId);
+            mc?.ClearPath();
+
+            switch (action)
+            {
+                case ManualDriveAction.Forward:
+                    if (Math.Abs(robot.AngularVelocity) <= 0.02f)
+                        robot.ExecuteCommand(RobotCommand.MoveForward);
+                    break;
+                case ManualDriveAction.TurnLeft:
+                    if (robot.LinearVelocity <= robot.Config.SpeedTolerance)
+                        robot.ExecuteCommand(RobotCommand.Rotate(-float.MaxValue));
+                    break;
+                case ManualDriveAction.TurnRight:
+                    if (robot.LinearVelocity <= robot.Config.SpeedTolerance)
+                        robot.ExecuteCommand(RobotCommand.Rotate(float.MaxValue));
+                    break;
+            }
+
+            if (!Engine.IsRunning || Engine.IsPaused) Engine.Start();
+        }
+
         /// <summary>
         /// 无 UI 环境下的单步/批量仿真驱动入口，用于单元测试或控制台批处理。
         /// </summary>
@@ -153,5 +230,16 @@ namespace WarehouseGridSimulation.Core.App
             }
             return last;
         }
+    }
+
+    /// <summary>
+    /// 手动控制基础动作类型。
+    /// </summary>
+    public enum ManualDriveAction
+    {
+        Forward = 0,
+        TurnLeft = 1,
+        TurnRight = 2,
+        Brake = 3
     }
 }

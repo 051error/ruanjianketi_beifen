@@ -36,7 +36,9 @@ namespace WarehouseGridSimulation.Skia.Rendering
         private readonly SKPaint _arrowPaint = new SKPaint { Color = new SKColor(235, 45, 45), Style = SKPaintStyle.Fill, IsAntialias = true };
         private readonly SKPaint _centerPaint = new SKPaint { Color = new SKColor(40, 50, 60), Style = SKPaintStyle.Fill, IsAntialias = true };
         private readonly SKPaint _badgeBackgroundPaint = new SKPaint { Color = new SKColor(35, 45, 55), Style = SKPaintStyle.Fill, IsAntialias = true };
+        private readonly SKPaint _badgeCollisionPaint = new SKPaint { Color = new SKColor(220, 40, 40), Style = SKPaintStyle.Fill, IsAntialias = true };
         private readonly SKPaint _badgeTextPaint = new SKPaint { Color = SKColors.White, Typeface = YaHeiBoldTypeface, TextSize = 9.5f, IsAntialias = true, TextAlign = SKTextAlign.Center };
+        private readonly SKPaint _selectionHaloPaint = new SKPaint { Color = new SKColor(0, 195, 255, 230), Style = SKPaintStyle.Stroke, StrokeWidth = 2.5f, IsAntialias = true };
         private readonly SKPath _arrowPath = new SKPath();
         private float _arrowBodyLength = -1f;
         private float _arrowBodyWidth = -1f;
@@ -44,17 +46,8 @@ namespace WarehouseGridSimulation.Skia.Rendering
         public static SKTypeface YaHeiTypeface => _yaHeiTypeface ??= SKTypeface.FromFamilyName("Microsoft YaHei");
         public static SKTypeface YaHeiBoldTypeface => _yaHeiBoldTypeface ??= SKTypeface.FromFamilyName("Microsoft YaHei", SKFontStyle.Bold);
 
-        private static readonly SKColor[] RobotColors = new[]
-        {
-            new SKColor(30, 144, 255),  // 亮蓝
-            new SKColor(255, 140, 0),   // 橙黄
-            new SKColor(46, 139, 87),   // 海洋绿
-            new SKColor(186, 85, 211),  // 紫罗兰
-            new SKColor(220, 20, 60),   // 猩红
-            new SKColor(0, 180, 216),   // 青蓝
-            new SKColor(241, 196, 15),  // 金黄
-            new SKColor(155, 89, 182)   // 紫晶
-        };
+        private static readonly SKColor RobotWarmYellowColor = new SKColor(255, 175, 20); // 专属暖黄色小车底盘
+        private static readonly SKColor UnifiedPathColor = new SKColor(30, 144, 255);      // 统一规划路径折线色 (亮蓝)
 
         public void Render(
             SKCanvas canvas,
@@ -78,10 +71,11 @@ namespace WarehouseGridSimulation.Skia.Rendering
             ref SKRect viewportMinBtnRect,
             ref SKRect statusMinBtnRect,
             float renderFps,
-            float interpolationAlpha)
+            float interpolationAlpha,
+            int? selectedRobotId = null)
         {
             // 使用 SkiaSharp 统一光栅化渲染全场景地图、机群位姿、路径轨迹与双 HUD 仪表盘。
-            // canvas: 渲染目标画布; viewWidth: 视口宽度; viewHeight: 视口高度; map: 仓储网格地图; snapshot: 最新权威状态快照; offsetX: 视口水平平移量; offsetY: 视口垂直平移量; scale: 视口缩放比例; baseCellPixels: 基础单格像素跨度; mode: 当前仿真运行模式; selectedTarget: 单机模式下选中的目标点坐标; showPath: 是否渲染规划路径折线; showTargetLines: 是否绘制目标配对连线; multiTargets: 多机模式下的目标点集合; isViewportHudMinimized: 视口 HUD 卡片是否处于最小化收起状态; isStatusHudMinimized: 状态 HUD 卡片是否处于最小化收起状态; viewportHudRect: 视口 HUD 卡片外框几何矩形引用; statusHudRect: 状态 HUD 卡片外框几何矩形引用; viewportMinBtnRect: 视口折叠按钮矩形引用; statusMinBtnRect: 状态折叠按钮矩形引用; renderFps: 当前界面实时渲染刷新帧率; interpolationAlpha: 渲染位姿插值系数。
+            // canvas: 渲染目标画布; viewWidth: 视口宽度; viewHeight: 视口高度; map: 仓储网格地图; snapshot: 最新权威状态快照; offsetX: 视口水平平移量; offsetY: 视口垂直平移量; scale: 视口缩放比例; baseCellPixels: 基础单格像素跨度; mode: 当前仿真运行模式; selectedTarget: 单机模式下选中的目标点坐标; showPath: 是否渲染规划路径折线; showTargetLines: 是否绘制目标配对连线; multiTargets: 多机模式下的目标点集合; isViewportHudMinimized: 视口 HUD 卡片是否处于最小化收起状态; isStatusHudMinimized: 状态 HUD 卡片是否处于最小化收起状态; viewportHudRect: 视口 HUD 卡片外框几何矩形引用; statusHudRect: 状态 HUD 卡片外框几何矩形引用; viewportMinBtnRect: 视口折叠按钮矩形引用; statusMinBtnRect: 状态折叠按钮矩形引用; renderFps: 当前界面实时渲染刷新帧率; interpolationAlpha: 渲染位姿插值系数; selectedRobotId: 当前选中受控的机器人全局编号。
             if (canvas == null) return;
 
             // 1. 背景清屏 (柔和浅色背景)
@@ -129,10 +123,10 @@ namespace WarehouseGridSimulation.Skia.Rendering
             }
 
             // 6. 绘制所有机器人实体
-            DrawRobots(canvas, snapshot, map, offsetX, offsetY, cellPixels, interpolationAlpha);
+            DrawRobots(canvas, snapshot, map, offsetX, offsetY, cellPixels, interpolationAlpha, selectedRobotId);
 
-            // 多机模式下绘制机器人右上角编号徽标
-            if (mode == SimulationMode.MultiRobot && snapshot?.Robots != null)
+            // 绘制机器人右上角编号徽标 (多机模式，或存在碰撞警示时显示红标)
+            if (snapshot?.Robots != null && (mode == SimulationMode.MultiRobot || snapshot.Robots.Any(r => r.HasCollided)))
             {
                 DrawMultiRobotBadges(canvas, snapshot, map, offsetX, offsetY, cellPixels, interpolationAlpha);
             }
@@ -247,14 +241,16 @@ namespace WarehouseGridSimulation.Skia.Rendering
                 {
                     StationType.Pick => new SKColor(46, 204, 113, 50),
                     StationType.Drop => new SKColor(231, 76, 60, 50),
-                    _ => new SKColor(155, 89, 182, 50)
+                    StationType.Waiting => new SKColor(243, 156, 18, 50),
+                    _ => new SKColor(243, 156, 18, 50)
                 };
 
                 SKColor borderColor = st.Type switch
                 {
                     StationType.Pick => new SKColor(39, 174, 96),
                     StationType.Drop => new SKColor(192, 57, 43),
-                    _ => new SKColor(142, 68, 173)
+                    StationType.Waiting => new SKColor(230, 126, 34),
+                    _ => new SKColor(230, 126, 34)
                 };
 
                 using (var bgPaint = new SKPaint { Color = bgColor, Style = SKPaintStyle.Fill, IsAntialias = true })
@@ -376,7 +372,6 @@ namespace WarehouseGridSimulation.Skia.Rendering
                 int targetIdx = Math.Clamp(r.CurrentTargetIndex, 0, r.CurrentPath.Count);
                 if (targetIdx >= r.CurrentPath.Count) continue; // 全部路径已走完
 
-                SKColor color = RobotColors[i % RobotColors.Length];
                 var position = Pose2D.Lerp(r.PreviousPosition, r.Position, interpolationAlpha);
 
                 using (var pathLine = new SKPath())
@@ -395,7 +390,7 @@ namespace WarehouseGridSimulation.Skia.Rendering
 
                     using (var pathPaint = new SKPaint
                     {
-                        Color = color.WithAlpha(170),
+                        Color = UnifiedPathColor.WithAlpha(170),
                         Style = SKPaintStyle.Stroke,
                         StrokeWidth = Math.Max(2f, cellPixels * 0.08f),
                         PathEffect = SKPathEffect.CreateDash(new[] { 6f, 4f }, 0),
@@ -410,9 +405,9 @@ namespace WarehouseGridSimulation.Skia.Rendering
             }
         }
 
-        private void DrawRobots(SKCanvas canvas, SimulationSnapshot snapshot, GridMap map, float ox, float oy, float cellPixels, float interpolationAlpha)
+        private void DrawRobots(SKCanvas canvas, SimulationSnapshot snapshot, GridMap map, float ox, float oy, float cellPixels, float interpolationAlpha, int? selectedRobotId)
         {
-            // 绘制机器人实体底盘、阴影、航向箭头与状态载荷。
+            // 绘制机器人实体底盘、阴影、航向箭头与选中小车高亮光圈。
             if (snapshot?.Robots == null) return;
 
             float bodyLength = (0.42f / map.CellSizeMeters) * cellPixels;
@@ -437,15 +432,24 @@ namespace WarehouseGridSimulation.Skia.Rendering
             {
                 var r = snapshot.Robots[i];
                 var position = Pose2D.Lerp(r.PreviousPosition, r.Position, interpolationAlpha);
-                _bodyPaint.Color = (i == 0) ? new SKColor(255, 175, 20) : RobotColors[i % RobotColors.Length];
+                _bodyPaint.Color = RobotWarmYellowColor;
 
                 float centerPx = ox + (position.X / map.CellSizeMeters) * cellPixels;
                 float centerPy = oy + (position.Y / map.CellSizeMeters) * cellPixels;
 
                 canvas.Save();
                 canvas.Translate(centerPx, centerPy);
+
                 float angleDegrees = position.Heading * (180f / (float)Math.PI);
                 canvas.RotateDegrees(angleDegrees);
+
+                // 选中高亮光环 (随机器人局部朝向同步自旋)
+                if (selectedRobotId.HasValue && r.Id == selectedRobotId.Value)
+                {
+                    float haloPad = Math.Max(2f, cellPixels * 0.08f);
+                    var haloRect = new SKRect(bodyRect.Left - haloPad, bodyRect.Top - haloPad, bodyRect.Right + haloPad, bodyRect.Bottom + haloPad);
+                    canvas.DrawRoundRect(haloRect, 6f, 6f, _selectionHaloPaint);
+                }
 
                 var shadowRect = new SKRect(bodyRect.Left + 2, bodyRect.Top + 2, bodyRect.Right + 2, bodyRect.Bottom + 2);
                 canvas.DrawRoundRect(shadowRect, 4f, 4f, _shadowPaint);
@@ -461,7 +465,7 @@ namespace WarehouseGridSimulation.Skia.Rendering
 
         private void DrawMultiRobotBadges(SKCanvas canvas, SimulationSnapshot snapshot, GridMap map, float ox, float oy, float cellPixels, float interpolationAlpha)
         {
-            // 绘制多机模式下固定在机器人右上方的编号徽标。
+            // 绘制机器人右上方的编号徽标 (发生碰撞的机器人背景从深黑色变为醒目红色警示)。
             for (int i = 0; i < snapshot.Robots.Count; i++)
             {
                 var r = snapshot.Robots[i];
@@ -471,7 +475,8 @@ namespace WarehouseGridSimulation.Skia.Rendering
 
                 float badgeX = centerPx + cellPixels * 0.35f;
                 float badgeY = centerPy - cellPixels * 0.35f;
-                canvas.DrawCircle(badgeX, badgeY, 8f, _badgeBackgroundPaint);
+                var bgPaint = r.HasCollided ? _badgeCollisionPaint : _badgeBackgroundPaint;
+                canvas.DrawCircle(badgeX, badgeY, 8f, bgPaint);
                 canvas.DrawText($"{r.Id}", badgeX, badgeY + 3.5f, _badgeTextPaint);
             }
         }
@@ -488,7 +493,9 @@ namespace WarehouseGridSimulation.Skia.Rendering
             _arrowPaint.Dispose();
             _centerPaint.Dispose();
             _badgeBackgroundPaint.Dispose();
+            _badgeCollisionPaint.Dispose();
             _badgeTextPaint.Dispose();
+            _selectionHaloPaint.Dispose();
             _arrowPath.Dispose();
         }
 
@@ -631,13 +638,13 @@ namespace WarehouseGridSimulation.Skia.Rendering
                 string gxStr = robot != null ? $"{robot.GridPosition.X}, {robot.GridPosition.Y}" : "-";
                 string physStr = robot != null ? $"{robot.Position.X:F2}, {robot.Position.Y:F2}m" : "-";
                 string headingStr = robot != null ? $"{robot.Position.Heading * 180f / Math.PI:F0}°" : "-";
-                string stateStr = robot != null ? robot.MotionState.ToString() : "-";
+                string stateStr = (snapshot?.IsDeadlockActive == true) ? "死锁自愈中" : (robot != null ? robot.MotionState.ToString() : "-");
                 string speedStr = robot != null ? $"{robot.LinearVelocity:F2} m/s" : "-";
                 string angularSpeedStr = robot != null ? $"{robot.AngularVelocity * 180f / Math.PI:F0} °/s" : "-";
                 string targetStr = (mode == SimulationMode.SingleRobot)
                     ? (selectedTarget.HasValue ? $"{selectedTarget.Value.X}, {selectedTarget.Value.Y}" : "未设置")
                     : $"{multiTargets.Count} 个对角目标";
-                string collisionStr = $"{snapshot?.CollisionEvents?.Count ?? 0} 次";
+                string collisionStr = $"{snapshot?.TotalCollisionCount ?? 0} 次";
 
                 string[,] rows = new string[6, 4]
                 {

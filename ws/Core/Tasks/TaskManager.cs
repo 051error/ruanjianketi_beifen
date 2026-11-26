@@ -72,8 +72,9 @@ namespace WarehouseGridSimulation.Core.Tasks
                     int dist = robot.GridPosition.ManhattanDistance(task.PickStation.Position);
                     if (dist < bestDist)
                     {
-                        // 校验可达性
-                        var planResult = planner.PlanPath(map, robot.GridPosition, task.PickStation.Position);
+                        // 校验可达性 (自动绕开其他停泊闲置的机器人)
+                        var planResult = planner.PlanPath(map, robot.GridPosition, task.PickStation.Position, pt =>
+                            pt != task.PickStation.Position && robots.Any(rb => rb.Id != robot.Id && rb.GridPosition == pt && rb.CurrentTaskId == null));
                         if (planResult.Success)
                         {
                             bestDist = dist;
@@ -138,8 +139,9 @@ namespace WarehouseGridSimulation.Core.Tasks
                             robot.HasCargo = true;
                             task.WaitTimer = 0f;
 
-                            // 规划前往卸货点的路径
-                            var planResult = planner.PlanPath(map, robot.GridPosition, task.DropStation.Position);
+                            // 规划前往卸货点的路径 (自动绕开其他停泊闲置的机器人)
+                            var planResult = planner.PlanPath(map, robot.GridPosition, task.DropStation.Position, pt =>
+                                pt != task.DropStation.Position && robots.Any(rb => rb.Id != robot.Id && rb.GridPosition == pt && rb.CurrentTaskId == null));
                             if (planResult.Success)
                             {
                                 task.Status = TaskStatus.MovingToDrop;

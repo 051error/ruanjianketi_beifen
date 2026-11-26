@@ -23,8 +23,8 @@ namespace WarehouseGridSimulation.Core.Robots
         public float ChassisWidth { get; set; } = 0.38f; // 底盘宽度 (米)
         public float CollisionRadius { get; set; } = 0.25f; // 碰撞检测包络圆半径 (米)
 
-        public float PositionTolerance { get; set; } = 0.05f; // 到位距离容差 (米)
-        public float HeadingTolerance { get; set; } = 0.05f; // 航向角对齐容差 (弧度)
+        public float PositionTolerance { get; set; } = 0.1f; // 到位距离容差 (米)
+        public float HeadingTolerance { get; set; } = 0.01f; // 航向角对齐容差 (弧度，约0.57°高精度判停)
         public float SpeedTolerance { get; set; } = 0.05f; // 停止判定速度容差 (m/s)
 
         public float CreepThreshold { get; set; } = 0.08f; // 切换到闭环精对准的剩余距离门限 (米)

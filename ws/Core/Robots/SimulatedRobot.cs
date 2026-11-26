@@ -18,6 +18,7 @@ namespace WarehouseGridSimulation.Core.Robots
 
         public bool HasCargo { get; set; }
         public int? CurrentTaskId { get; set; }
+        public bool HasCollided { get; set; } = false;
 
         public RobotConfig Config { get; }
         public RobotCommand ActiveCommand { get; private set; } = RobotCommand.Stop;
@@ -227,43 +228,6 @@ namespace WarehouseGridSimulation.Core.Robots
             }
         }
 
-        public void SnapHeading(float targetHeading)
-        {
-            // 精确对齐目标航向角并清除残留角速度。
-            // targetHeading: 目标航向角弧度值。
-            Position = new Pose2D(Position.X, Position.Y, targetHeading);
-            AngularVelocity = 0f;
-        }
-
-        public void ApplyLateralCorrection(float lateralDx, float lateralDy, float maxLimit)
-        {
-            // 沿航道法向施加闭环控制器计算的微量平滑纠偏位移。
-            // lateralDx: 横轴微量纠偏位移增量; lateralDy: 纵轴微量纠偏位移增量; maxLimit: 单步允许施加的最大纠偏位移绝对值上限。
-            float clampedDx = Math.Clamp(lateralDx, -maxLimit, maxLimit);
-            float clampedDy = Math.Clamp(lateralDy, -maxLimit, maxLimit);
-            Position = new Pose2D(Position.X + clampedDx, Position.Y + clampedDy, Position.Heading);
-        }
-
-        public void AlignToTrack(float? lockX, float? lockY, float standardHeading)
-        {
-            // 沿正交磁带航道纠偏对准中轴线并消除横向漂移。
-            // lockX: 垂直航道时锁定的标准横坐标; lockY: 水平航道时锁定的标准纵坐标; standardHeading: 当前航段的标准正交航向。
-            float newX = lockX.HasValue ? lockX.Value : Position.X;
-            float newY = lockY.HasValue ? lockY.Value : Position.Y;
-            Position = new Pose2D(newX, newY, standardHeading);
-        }
-
-        public void SnapToCenter(GridPoint grid, float cellSizeMeters, float targetHeading)
-        {
-            // 在到达转弯点或终点停稳时精准归心并对齐正交正向。
-            // grid: 目标对齐的栅格; cellSizeMeters: 单栅格尺寸; targetHeading: 目标航向。
-            float cx = (grid.X + 0.5f) * cellSizeMeters;
-            float cy = (grid.Y + 0.5f) * cellSizeMeters;
-            Position = new Pose2D(cx, cy, targetHeading);
-            ConfirmedGrid = grid;
-            AngularVelocity = 0f;
-        }
-
         public void TeleportForReset(Pose2D pose)
         {
             // 在重置或初始部署时安全复位机器人位姿与确认网格。
@@ -273,6 +237,7 @@ namespace WarehouseGridSimulation.Core.Robots
             ConfirmedGrid = new GridPoint((int)Math.Floor(pose.X / _cellSizeMeters), (int)Math.Floor(pose.Y / _cellSizeMeters));
             LinearVelocity = 0f;
             AngularVelocity = 0f;
+            HasCollided = false;
             ActiveCommand = RobotCommand.Stop;
             MotionState = RobotMotionState.Stopped;
         }

@@ -8,7 +8,7 @@ namespace WarehouseGridSimulation.Core.Motion
     /// <summary>
     /// 机器人运动控制器 (MotionController)。
     /// 职责：
-    /// 1. 将离散路径节点列表与机器人当前物理位姿转换为机器人支持的纯基础指令 (MoveForward, TurnLeft, TurnRight, Stop)；
+    /// 1. 将离散路径节点列表与机器人当前物理位姿转换为机器人支持的基础指令；
     /// 2. 严格遵循控制闭环，禁止直接修改或瞬移机器人坐标；
     /// 3. 管理授权路段终点与停靠判定，包含位置容差与速度容差，有效防止单步超调 (Overshoot)。
     /// </summary>
@@ -25,7 +25,6 @@ namespace WarehouseGridSimulation.Core.Motion
         public bool IsAwaitingAuthorization { get; private set; } = false;
 
         private readonly PidController _dockingPid = new PidController(2.0f, 0.05f, 0.1f, 0f, 0.2f);
-        private readonly PidController _lateralPid = new PidController(1.8f, 0.05f, 0.1f, -0.1f, 0.1f);
 
         public GridPoint? CurrentTargetGrid => (CurrentPath != null && CurrentTargetIndex < CurrentPath.Count)
             ? CurrentPath[CurrentTargetIndex]
@@ -38,7 +37,7 @@ namespace WarehouseGridSimulation.Core.Motion
             RobotId = robotId;
         }
 
-        public void SetPath(IReadOnlyList<GridPoint> path, int initialAuthorizedIndex = -1, int startTargetIndex = -1)
+        public void SetPath(IReadOnlyList<GridPoint> path, int initialAuthorizedIndex = 0, int startTargetIndex = -1)
         {
             // 为机器人配置新的规划路径、初始授权索引与起始目标节点。
             // path: 规划路径节点序列; initialAuthorizedIndex: 初始已获得通行许可的最大路径节点索引; startTargetIndex: 起始目标节点索引。
@@ -52,11 +51,12 @@ namespace WarehouseGridSimulation.Core.Motion
                 CurrentTargetIndex = (CurrentPath.Count > 1) ? 1 : 0;
             }
             LastConfirmedGrid = (CurrentPath.Count > 0) ? CurrentPath[0] : GridPoint.Empty;
-            AuthorizedIndex = initialAuthorizedIndex >= 0 ? initialAuthorizedIndex : CurrentPath.Count - 1;
+            AuthorizedIndex = (initialAuthorizedIndex >= 0 && initialAuthorizedIndex < CurrentPath.Count)
+                ? initialAuthorizedIndex
+                : 0;
             IsPathCompleted = CurrentPath.Count == 0;
             IsAwaitingAuthorization = false;
             _dockingPid.Reset();
-            _lateralPid.Reset();
         }
 
         public void AdvanceConfirmedGrid(GridPoint newConfirmedGrid)
@@ -82,7 +82,6 @@ namespace WarehouseGridSimulation.Core.Motion
             IsPathCompleted = true;
             IsAwaitingAuthorization = false;
             _dockingPid.Reset();
-            _lateralPid.Reset();
         }
 
         private static float SnapToOrthogonalHeading(float heading)
@@ -270,22 +269,6 @@ namespace WarehouseGridSimulation.Core.Motion
 
                 // 下发转向 (角度) 信号
                 return RobotCommand.Rotate(angleDiff);
-            }
-
-            // 3.1 闭环横向循迹 PID 纠偏：在正交巡航直道上动态收敛横向偏差，紧贴中心线
-            if (segDx != 0 && segDy == 0)
-            {
-                // 水平航道：消除纵轴横向偏差 (中心线纵坐标为 targetPhysY)
-                float ey = targetPhysY - robot.Position.Y;
-                float lateralSpeed = _lateralPid.Compute(ey, dt);
-                robot.ApplyLateralCorrection(0f, lateralSpeed * dt, maxLimit: 0.005f);
-            }
-            else if (segDx == 0 && segDy != 0)
-            {
-                // 垂直航道：消除横轴横向偏差 (中心线横坐标为 targetPhysX)
-                float ex = targetPhysX - robot.Position.X;
-                float lateralSpeed = _lateralPid.Compute(ex, dt);
-                robot.ApplyLateralCorrection(lateralSpeed * dt, 0f, maxLimit: 0.005f);
             }
 
             // 4. 到站或转弯前动力学减速与闭环 PID 精准对位判断

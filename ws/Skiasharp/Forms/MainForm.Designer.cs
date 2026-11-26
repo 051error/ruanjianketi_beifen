@@ -1,6 +1,7 @@
 using System;
 using System.Drawing;
 using System.Windows.Forms;
+using WarehouseGridSimulation.Core.Planning;
 using WarehouseGridSimulation.Skia.Controls;
 using WarehouseGridSimulation.Skia.Rendering;
 using WarehouseGridSimulation.Skia.UI;
@@ -410,11 +411,6 @@ namespace WarehouseGridSimulation.Skia.Forms
             _cmbMultiAlgorithm.Font = new Font("Microsoft YaHei", 9f);
             _cmbMultiAlgorithm.Location = new Point(14, mY);
             _cmbMultiAlgorithm.Size = new Size(250, 26);
-            _cmbMultiAlgorithm.Items.Add("CBS (基于冲突搜索)");
-            _cmbMultiAlgorithm.Items.Add("ECBS (增强型CBS快速算法)");
-            _cmbMultiAlgorithm.Items.Add("CA* (协同A*算法)");
-            _cmbMultiAlgorithm.Items.Add("WHCA* (窗口协同A*算法)");
-            _cmbMultiAlgorithm.SelectedIndex = 1;
             _cmbMultiAlgorithm.SelectedIndexChanged += OnMultiAlgorithmSelectedIndexChanged;
             _pnlMultiMode.Controls.Add(_cmbMultiAlgorithm);
             mY += 34;
@@ -738,9 +734,9 @@ namespace WarehouseGridSimulation.Skia.Forms
             // 动态显隐多机调度算法专属参数微调面板并紧凑自适应排版。
             if (_cmbMultiAlgorithm == null || _pnlMultiMode == null) return;
 
-            int selectedIndex = _cmbMultiAlgorithm.SelectedIndex;
-            bool isEcbs = (selectedIndex == 1);
-            bool isWhca = (selectedIndex == 3);
+            string selectedId = (_cmbMultiAlgorithm.SelectedItem as IMultiAgentPathPlanner)?.Id ?? string.Empty;
+            bool isEcbs = string.Equals(selectedId, "ECBS", StringComparison.OrdinalIgnoreCase);
+            bool isWhca = string.Equals(selectedId, "WHCAStar", StringComparison.OrdinalIgnoreCase);
 
             if (_pnlEcbsParams != null) _pnlEcbsParams.Visible = isEcbs;
             if (_pnlWhcaParams != null) _pnlWhcaParams.Visible = isWhca;

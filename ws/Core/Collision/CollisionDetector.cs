@@ -58,11 +58,72 @@ namespace WarehouseGridSimulation.Core.Collision
     /// </summary>
     public class CollisionDetector
     {
+        private readonly HashSet<string> _activeContactKeys = new HashSet<string>();
+
+        public int TotalCollisionCount { get; private set; } = 0;
+
+        public List<CollisionEvent> UpdateCollisions(
+            float simTime,
+            IReadOnlyList<SimulatedRobot> robots,
+            GridMap map)
+        {
+            // 更新当前帧碰撞生命周期状态并返回新发生的碰撞事故列表。
+            // simTime: 当前仿真时刻秒数; robots: 活跃机器人实体列表; map: 仓储栅格地图。
+            var currentContacts = CheckCollisions(simTime, robots, map);
+            var newIncidents = new List<CollisionEvent>();
+            var currentKeys = new HashSet<string>();
+
+            foreach (var col in currentContacts)
+            {
+                string key = GetContactKey(col);
+                currentKeys.Add(key);
+
+                if (!_activeContactKeys.Contains(key))
+                {
+                    TotalCollisionCount++;
+                    newIncidents.Add(col);
+                }
+            }
+
+            _activeContactKeys.Clear();
+            foreach (var k in currentKeys)
+            {
+                _activeContactKeys.Add(k);
+            }
+
+            return newIncidents;
+        }
+
+        public void Reset()
+        {
+            // 重置碰撞检测器的累计计数与接触激活状态。
+            _activeContactKeys.Clear();
+            TotalCollisionCount = 0;
+        }
+
+        private static string GetContactKey(CollisionEvent col)
+        {
+            // 生成碰撞事件的标准化无序接触唯一识别键。
+            // col: 目标碰撞事件对象。
+            if (col.Type == CollisionType.RobotWithRobot && col.RobotId2.HasValue)
+            {
+                int minId = Math.Min(col.RobotId1, col.RobotId2.Value);
+                int maxId = Math.Max(col.RobotId1, col.RobotId2.Value);
+                return $"R:{minId}-{maxId}";
+            }
+            if (col.Type == CollisionType.RobotWithObstacle && col.ObstacleGrid.HasValue)
+            {
+                return $"O:{col.RobotId1}-({col.ObstacleGrid.Value.X},{col.ObstacleGrid.Value.Y})";
+            }
+            return $"U:{col.RobotId1}-{col.Description}";
+        }
+
         public List<CollisionEvent> CheckCollisions(
             float simTime,
             IReadOnlyList<SimulatedRobot> robots,
             GridMap map)
         {
+            // 基于物理几何包络与扫掠位移执行静态及跨步长碰撞检测。
             var collisionList = new List<CollisionEvent>();
             if (robots == null || robots.Count == 0) return collisionList;
 

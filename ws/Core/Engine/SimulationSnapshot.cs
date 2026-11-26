@@ -17,6 +17,7 @@ namespace WarehouseGridSimulation.Core.Engine
         public RobotMotionState MotionState { get; init; }
         public bool HasCargo { get; init; }
         public int? CurrentTaskId { get; init; }
+        public bool HasCollided { get; init; }
         public IReadOnlyList<GridPoint> CurrentPath { get; init; }
         public int CurrentTargetIndex { get; init; }
         public GridPoint? TargetGrid { get; init; }
@@ -48,6 +49,9 @@ namespace WarehouseGridSimulation.Core.Engine
         public float SimulationTime { get; init; }
         public bool IsRunning { get; init; }
         public bool IsPaused { get; init; }
+        public int TotalCollisionCount { get; init; }
+        public bool IsDeadlockActive { get; init; }
+        public string DeadlockInfo { get; init; }
 
         public IReadOnlyList<RobotSnapshot> Robots { get; init; }
         public IReadOnlyList<TaskSnapshot> Tasks { get; init; }

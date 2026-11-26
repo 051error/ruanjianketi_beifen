@@ -527,7 +527,7 @@ namespace WarehouseGridSimulation.Tests
             // 验证核心层单机导航外观接口在无界面环境下的寻路、下发与步进完成闭环。
             // app: 仿真应用外观实例; target: 导航目标网格; navResult: 导航启动结果对象; mc: 机器人关联运动控制器。
             var app = new SimulationApp();
-            var target = new GridPoint(14, 12); // 朝向上方直行两格
+            var target = new GridPoint(15, 25); // 朝向上方直行两格 (初始位于上货区 (15, 27))
 
             var navResult = app.NavigateRobot(1, target);
             Assert.IsTrue(navResult.Success, "无 UI 调度单机导航应成功规划并启动");
@@ -709,15 +709,15 @@ namespace WarehouseGridSimulation.Tests
             // 验证单机模式在重设导航目标时旧目标栅格与旧路径所有未通行预约资源被彻底清除释放。
             // app: 仿真外观门面实例; oldTarget: 原先设定的旧目标网格; newTarget: 重新设定的新目标网格。
             var app = new SimulationApp();
-            var oldTarget = new GridPoint(14, 5);
-            var newTarget = new GridPoint(14, 25);
+        var oldTarget = new GridPoint(15, 20);
+        var newTarget = new GridPoint(20, 27);
 
-            // 1. 下发旧导航目标 (14, 5)
+        // 1. 下发旧导航目标 (15, 20)
             var res1 = app.NavigateRobot(1, oldTarget);
             Assert.IsTrue(res1.Success);
             Assert.IsTrue(app.Engine.ReservationManager.ReservedGrids.ContainsKey(oldTarget), "旧目标点必须已被预约");
 
-            // 2. 在移动前或移动途中重新设定新目标 (14, 25)
+        // 2. 在移动前或移动途中重新设定新目标 (20, 27)
             var res2 = app.NavigateRobot(1, newTarget);
             Assert.IsTrue(res2.Success);
 
@@ -733,7 +733,7 @@ namespace WarehouseGridSimulation.Tests
             // 验证机器人沿长直道连续平滑巡航到站，停稳后朝向精确对齐正交四方向之一。
             // robot: 目标机器人实体; mc: 运动控制器实例; headingDiff: 最终航向与正向角度偏差。
             var app = new SimulationApp();
-            var target = new GridPoint(14, 8); // 向正上方延伸 6 个栅格的长直道
+        var target = new GridPoint(15, 21); // 向正上方延伸 6 个栅格的长直道
 
             var res = app.NavigateRobot(1, target);
             Assert.IsTrue(res.Success);
@@ -761,20 +761,20 @@ namespace WarehouseGridSimulation.Tests
             // 验证机器人走过 L 型折线路径后拐弯转角栅格的物理占用被彻底释放。
             // cornerTarget: 经过单次折线拐角的目标终点网格; cornerGrid: 路径中实际发生转向的拐角栅格。
             var app = new SimulationApp();
-            // 起点 (14, 14)，拐角 (14, 10)，终点 (18, 10)
-            var cornerTarget = new GridPoint(18, 10);
-            var cornerGrid = new GridPoint(14, 10);
+        // 起点 (15, 27)，拐角 (15, 23)，终点 (19, 23)
+        var cornerTarget = new GridPoint(19, 23);
+        var cornerGrid = new GridPoint(15, 23);
 
             var res = app.NavigateRobot(1, cornerTarget);
             Assert.IsTrue(res.Success);
 
-            // 驱动仿真直到完全到达终点 (18, 10)
+        // 驱动仿真直到完全到达终点 (19, 23)
             app.RunHeadless(80);
 
             var robot = app.Engine.GetRobot(1);
             Assert.AreEqual(cornerTarget, robot.ConfirmedGrid, "机器人应到达最终目标");
 
-            // 核心断言：拐角栅格 (14, 10) 绝不能残留在 OccupiedGrids 占用池中 (杜绝橙色高亮残留)
+        // 核心断言：拐角栅格 (15, 23) 绝不能残留在 OccupiedGrids 占用池中 (杜绝橙色高亮残留)
             Assert.IsFalse(app.Engine.ReservationManager.OccupiedGrids.ContainsKey(cornerGrid), "拐角栅格在机器人驶离后必须已被彻底释放，禁止残留橙色占用");
 
             // 并且只有终点网格保留占用
@@ -789,12 +789,12 @@ namespace WarehouseGridSimulation.Tests
             // cellSize: 地图单网格物理尺寸; target: 导航目标网格; maxCrossTrackError: 行驶过程中的最大横向轨迹偏差。
             var app = new SimulationApp();
             float cellSize = app.CurrentMap.CellSizeMeters;
-            var target = new GridPoint(14, 9); // 向正上方移动 5 个网格
+        var target = new GridPoint(15, 22); // 向正上方移动 5 个网格
 
             app.NavigateRobot(1, target);
 
             float maxCrossTrackError = 0f;
-            float expectedCenterX = (14 + 0.5f) * cellSize; // 垂直航道 X 坐标应严格对齐第 14 列中心
+        float expectedCenterX = (15 + 0.5f) * cellSize; // 垂直航道 X 坐标应严格对齐第 15 列中心
 
             for (int i = 0; i < 40; i++)
             {
@@ -863,7 +863,7 @@ namespace WarehouseGridSimulation.Tests
             // 验证机器人在运动控制器闭环 PID 驱动下平滑到站，全程单步位移严格受限于动力学速度且无坐标跳变。
             // app: 仿真外观门面实例; target: 导航目标网格; prevPos: 前一仿真步长的世界坐标; maxStepJump: 记录的最大单步位移跳变距离; r: 目标机器人实体; distToCenter: 最终距离栅格中心的实际物理残差。
             var app = new SimulationApp();
-            var target = new GridPoint(14, 11); // 直行 3 格
+            var target = new GridPoint(15, 24); // 直行 3 格 (起点为上货区 (15, 27))
 
             var navRes = app.NavigateRobot(1, target);
             Assert.IsTrue(navRes.Success);
@@ -904,8 +904,8 @@ namespace WarehouseGridSimulation.Tests
             // 验证小车在直段高速巡航驶向转弯拐角时梯形连续减速，中途不发生速度断崖归零或状态提前变为停顿。
             // app: 仿真外观门面实例; cornerTarget: 经过单次折线拐角的目标终点网格; cornerGrid: 路径中实际发生转向的拐角栅格; r: 目标机器人实体; cornerPhysY: 拐角网格世界几何中心纵坐标; midwayStallDetected: 是否在中途检测到异常停顿标志。
             var app = new SimulationApp();
-            var cornerTarget = new GridPoint(18, 10);
-            var cornerGrid = new GridPoint(14, 10);
+            var cornerTarget = new GridPoint(19, 23);
+            var cornerGrid = new GridPoint(15, 23);
 
             var navRes = app.NavigateRobot(1, cornerTarget);
             Assert.IsTrue(navRes.Success);
@@ -933,7 +933,7 @@ namespace WarehouseGridSimulation.Tests
                 }
 
                 // 一旦拐弯完成开始横向行驶则退出前段监测
-                if (r.Position.X > (14 + 0.6f) * cellSize)
+                if (r.Position.X > (15 + 0.6f) * cellSize)
                 {
                     break;
                 }
@@ -987,35 +987,35 @@ namespace WarehouseGridSimulation.Tests
             Assert.IsTrue(distToGoal <= 0.02f, $"最终停靠位置与目标中心偏差为 {distToGoal:F4}m，应小于 2cm");
         }
 
-        // 场景 29：横向中心线循迹 PID 控制器在直角转弯后动态消除横向偏差并精准贴合航道
+        // 场景 29：高精度伺服旋转结合纵向中心停稳在直角转弯后使航道横向偏差收敛在毫米级
         [TestMethod]
         public void Scenario29_LateralCrossTrackPidDynamicallyEliminatesTrackingOffset()
         {
-            // 验证机器人在完成拐弯转向切入新航道后横向循迹闭环控制器持续纠偏，确保行驶轨迹严格对准栅格中心线。
-            // app: 仿真外观门面实例; cornerTarget: 包含直角拐弯的目标网格; navRes: 导航调用返回结果; r: 目标机器人实体; cellSize: 单网格物理边长; expectedY: 拐弯后水平航道标准中心纵坐标; maxHorizontalCrossTrackError: 水平巡航阶段记录的最大横向距离残差; mc: 运动控制器实例。
+            // 验证机器人在完成拐弯转向切入新航道后高精度伺服自旋到位，确保长直道行驶轨迹严格对准栅格中心线。
+            // app: 仿真外观门面实例; cornerTarget: 包含直角拐弯的目标网格; navRes: 导航调用返回结果; r: 目标机器人实体; cellSize: 单网格物理边长; expectedX: 拐弯后垂直航道标准中心横坐标; maxCrossTrackError: 巡航阶段记录的最大横向距离残差; mc: 运动控制器实例。
             var app = new SimulationApp();
-            var cornerTarget = new GridPoint(18, 10);
+            var cornerTarget = new GridPoint(19, 23);
 
             var navRes = app.NavigateRobot(1, cornerTarget);
             Assert.IsTrue(navRes.Success);
 
             var r = app.Engine.GetRobot(1);
             float cellSize = app.CurrentMap.CellSizeMeters;
-            float expectedY = (10 + 0.5f) * cellSize; // 拐角后水平段 Y 应为 5.775m
-            float maxHorizontalCrossTrackError = 0f;
+            float expectedX = (19 + 0.5f) * cellSize; // 拐角后垂直段 X 应为 19.5 * cellSize
+            float maxCrossTrackError = 0f;
 
             // 推进仿真直到到达终点
             for (int i = 0; i < 90; i++)
             {
                 app.Engine.Step();
 
-                // 当小车已拐过弯并进入水平直道巡航 (X 越过 15 列)
-                if (r.Position.X > (15 + 0.5f) * cellSize && r.LinearVelocity > 0.1f)
+                // 当小车已在 (19, 27) 拐过弯并进入垂直直道巡航 (Y 进入 26 行以上)
+                if (r.Position.Y < (26 + 0.5f) * cellSize && r.LinearVelocity > 0.1f)
                 {
-                    float lateralError = Math.Abs(r.Position.Y - expectedY);
-                    if (lateralError > maxHorizontalCrossTrackError)
+                    float lateralError = Math.Abs(r.Position.X - expectedX);
+                    if (lateralError > maxCrossTrackError)
                     {
-                        maxHorizontalCrossTrackError = lateralError;
+                        maxCrossTrackError = lateralError;
                     }
                 }
             }
@@ -1024,9 +1024,476 @@ namespace WarehouseGridSimulation.Tests
             Assert.IsTrue(mc.IsPathCompleted, "折线导航应顺利完成到达");
             Assert.AreEqual(cornerTarget, r.ConfirmedGrid, "最终地标应精准匹配目标点");
 
-            // 验证在水平航道巡航期间的横向误差被 PID 牢牢控制在 1 毫米以内
-            Assert.IsTrue(maxHorizontalCrossTrackError < 0.001f,
-                $"水平航道巡航最大横向偏差为 {maxHorizontalCrossTrackError:F5}m，应通过横向 PID 严格收敛至 1mm 以内");
+            // 验证在拐角后新航道巡航期间的横向误差牢牢控制在 1 毫米以内
+            Assert.IsTrue(maxCrossTrackError < 0.001f,
+                $"新航道巡航最大横向偏差为 {maxCrossTrackError:F5}m，应严格收敛至 1mm 以内");
+        }
+
+        // 场景 30：默认地图上货区、等待区与双排等距卸货区布局完备性验证
+        [TestMethod]
+        public void Scenario30_DefaultMapLayoutAndStationVerification()
+        {
+            // 验证系统默认地图中上货区、2行10列等待区以及上方两排平行等距卸货区 (中间间隔3行栅格) 的几何拓扑正确性。
+            // app: 仿真外观门面实例; map: 仓储网格地图; picks: 上货区站点列表; drops: 卸货区站点列表; waitings: 等待区站点列表; pickStation: 单个上货区站点; r: 默认配置的初始机器人实体。
+            var app = new SimulationApp();
+            var map = app.CurrentMap;
+
+            Assert.IsNotNull(map);
+            Assert.AreEqual(30, map.Width);
+            Assert.AreEqual(30, map.Height);
+
+            // 1. 验证上货区：1x1，位于地图下方正中间 (15, 27)
+            var picks = map.PickStations.ToList();
+            Assert.AreEqual(1, picks.Count, "默认地图应仅设置 1 个上货区");
+            var pickStation = picks[0];
+            Assert.AreEqual(new GridPoint(15, 27), pickStation.Position, "上货区应位于下方正中间 (15, 27)");
+
+            // 2. 验证卸货区：上方设置两排平行等距分布的卸货区，每排 3 个，中间间隔 3 行栅格 (第 1 排 Y=2，第 2 排 Y=6)
+            var drops = map.DropStations.OrderBy(d => d.Position.Y).ThenBy(d => d.Position.X).ToList();
+            Assert.AreEqual(6, drops.Count, "默认地图应设置 6 个卸货区 (两排各 3 个)");
+
+            var row1Drops = drops.Where(d => d.Position.Y == 2).OrderBy(d => d.Position.X).ToList();
+            Assert.AreEqual(3, row1Drops.Count, "第 1 排应包含 3 个卸货区");
+            Assert.AreEqual(new GridPoint(3, 2), row1Drops[0].Position, "卸货区-1 应位于 (3, 2)");
+            Assert.AreEqual(new GridPoint(15, 2), row1Drops[1].Position, "卸货区-2 应位于 (15, 2)");
+            Assert.AreEqual(new GridPoint(27, 2), row1Drops[2].Position, "卸货区-3 应位于 (27, 2)");
+            Assert.AreEqual(12, row1Drops[1].Position.X - row1Drops[0].Position.X, "第 1 排卸货区 1 与 2 间距应等距为 12");
+            Assert.AreEqual(12, row1Drops[2].Position.X - row1Drops[1].Position.X, "第 1 排卸货区 2 与 3 间距应等距为 12");
+
+            var row2Drops = drops.Where(d => d.Position.Y == 6).OrderBy(d => d.Position.X).ToList();
+            Assert.AreEqual(3, row2Drops.Count, "第 2 排应包含 3 个卸货区");
+            Assert.AreEqual(new GridPoint(3, 6), row2Drops[0].Position, "卸货区-4 应位于 (3, 6)");
+            Assert.AreEqual(new GridPoint(15, 6), row2Drops[1].Position, "卸货区-5 应位于 (15, 6)");
+            Assert.AreEqual(new GridPoint(27, 6), row2Drops[2].Position, "卸货区-6 应位于 (27, 6)");
+            Assert.AreEqual(12, row2Drops[1].Position.X - row2Drops[0].Position.X, "第 2 排卸货区 4 与 5 间距应等距为 12");
+            Assert.AreEqual(12, row2Drops[2].Position.X - row2Drops[1].Position.X, "第 2 排卸货区 5 与 6 间距应等距为 12");
+
+            // 验证两排卸货区垂直中间间隔 3 行栅格 (行 3、4、5 为通道间隔行)
+            Assert.AreEqual(3, row2Drops[0].Position.Y - row1Drops[0].Position.Y - 1, "两排卸货区中间应严格间隔 3 行栅格");
+
+            // 3. 验证等待区：2 行 10 列 (共 20 格)，位于上货区左侧，上货区位于等待区右侧第一列第二行
+            var waitings = map.WaitingStations.ToList();
+            Assert.AreEqual(20, waitings.Count, "等待区应包含 20 个栅格 (2行10列)");
+            for (int rowIdx = 1; rowIdx <= 2; rowIdx++)
+            {
+                int y = 25 + rowIdx;
+                for (int c = 1; c <= 10; c++)
+                {
+                    int x = 4 + c;
+                    var pt = new GridPoint(x, y);
+                    Assert.IsTrue(waitings.Any(w => w.Position == pt), $"等待区应包含位置 ({x}, {y})");
+                }
+            }
+
+            // 4. 验证默认机器人位于上货区 (15, 27)，朝向正上方
+            var r = app.Engine.GetRobot(1);
+            Assert.IsNotNull(r);
+            Assert.AreEqual(new GridPoint(15, 27), r.ConfirmedGrid, "初始机器人应部署在上货区");
+            float expectedHeading = -(float)Math.PI * 0.5f;
+            Assert.IsTrue(Math.Abs(Pose2D.AngleDifference(expectedHeading, r.Position.Heading)) < 0.05f, "初始机器人朝向应为正上方");
+        }
+
+        // 场景 31：多机调度环境下通过外观统一接口手动操控选定机器人
+        [TestMethod]
+        public void Scenario31_ManualDriveRobotDirectsSpecifiedRobotInMultiFleet()
+        {
+            // 验证在多机共存环境下通过外观方法仅驱动选定的特定机器人前进与自旋，其余机器人保持原有状态不受干扰。
+            // app: 仿真门面应用实例; r1: 驻留机群的 1 号机器人; r2: 被选定执行手动操控的 2 号机器人; initialR1Pos: 1 号车初始位姿; initialR2Y: 2 号车初始纵坐标。
+            var app = new SimulationApp();
+            var r1 = new SimulatedRobot(1, new GridPoint(10, 10), 0f, 0.55f);
+            var r2 = new SimulatedRobot(2, new GridPoint(20, 20), -(float)Math.PI * 0.5f, 0.55f); // 初始朝向向上
+            app.Engine.SetRobots(new[] { r1, r2 });
+
+            var initialR1Pos = r1.Position;
+            float initialR2Y = r2.Position.Y;
+
+            // 1. 对 2 号车发起长按前进
+            bool startDriveOk = app.ManualDriveRobot(2, ManualDriveAction.Forward, true);
+            Assert.IsTrue(startDriveOk, "对指定 2 号机器人发起手动前进应成功执行");
+
+            for (int i = 0; i < 15; i++)
+            {
+                app.MaintainManualDrive(2, ManualDriveAction.Forward);
+                app.Engine.Step();
+            }
+
+            // 验证 2 号车向前位移 (朝向上方，Y 减小)，且 1 号车完全静止未动
+            Assert.IsTrue(r2.Position.Y < initialR2Y - 0.2f, "2 号机器人应在手动长按驱动下向前行进");
+            Assert.AreEqual(initialR1Pos.X, r1.Position.X, 1e-4f, "1 号车横坐标不应受到 2 号车手控的影响");
+            Assert.AreEqual(initialR1Pos.Y, r1.Position.Y, 1e-4f, "1 号车纵坐标不应受到 2 号车手控的影响");
+            Assert.AreEqual(0f, r1.LinearVelocity, 1e-4f, "1 号车线速度应保持为零静止");
+
+            // 2. 释放 2 号车长按前进，验证其平滑制动停稳
+            app.ManualDriveRobot(2, ManualDriveAction.Forward, false);
+            for (int i = 0; i < 20; i++)
+            {
+                app.Engine.Step();
+            }
+
+            Assert.IsTrue(r2.LinearVelocity <= r2.Config.SpeedTolerance, "释放前进后 2 号机器人应平滑减速刹停");
+
+            // 3. 对 2 号车发起原地旋转，验证自旋互斥与精准动作
+            float prevHeadingR2 = r2.Position.Heading;
+            app.ManualDriveRobot(2, ManualDriveAction.TurnLeft, true);
+            for (int i = 0; i < 10; i++)
+            {
+                app.MaintainManualDrive(2, ManualDriveAction.TurnLeft);
+                app.Engine.Step();
+            }
+
+            Assert.AreNotEqual(prevHeadingR2, r2.Position.Heading, "2 号机器人在长按左转下应平滑旋转改变航向");
+
+            // 释放转向
+            app.ManualDriveRobot(2, ManualDriveAction.TurnLeft, false);
+            for (int i = 0; i < 20; i++)
+            {
+                app.Engine.Step();
+            }
+
+            Assert.AreEqual(0f, r2.AngularVelocity, 0.05f, "释放转向后 2 号机器人角速度应平稳归零");
+        }
+
+        // 场景 32：验证局部急停隔离与车车碰撞单次事故去重统计
+        [TestMethod]
+        public void Scenario32_PartialEmergencyStopAndSingleCollisionIncidentCount()
+        {
+            // 验证双车碰撞仅触发单次事故计数且局部急停涉事车辆而未涉事车辆保持巡航。
+            // map: 仿真地图; detector: 独立碰撞检测器; r1: 发生碰撞的 1 号车; r2: 发生碰撞的 2 号车; r3: 远端巡航的 3 号正常车; engine: 仿真引擎。
+            var map = new GridMap(20, 20, 0.55f);
+            var detector = new CollisionDetector();
+
+            // 1. 验证 CollisionDetector 自身对双车接触的单次事故统计与持续接触去重
+            var r1 = new SimulatedRobot(1, 2.0f, 2.0f, 0f, 0.55f);
+            var r2 = new SimulatedRobot(2, 2.2f, 2.0f, (float)Math.PI, 0.55f);
+
+            var firstCollisions = detector.UpdateCollisions(1.0f, new[] { r1, r2 }, map);
+            Assert.AreEqual(1, firstCollisions.Count, "两车相撞应仅产生 1 起新碰撞事故");
+            Assert.AreEqual(1, detector.TotalCollisionCount, "两车相撞事故总计数严格为 1 (不翻倍为 2)");
+
+            // 持续接触 5 个时间步，累计计数保持为 1
+            for (int step = 0; step < 5; step++)
+            {
+                var repeatCollisions = detector.UpdateCollisions(1.0f + (step + 1) * 0.1f, new[] { r1, r2 }, map);
+                Assert.AreEqual(0, repeatCollisions.Count, "持续相撞接触状态下不应重复产生新碰撞事故");
+                Assert.AreEqual(1, detector.TotalCollisionCount, "持续接触期间事故总数保持为 1");
+            }
+
+            // 2. 验证 SimulationEngine 环境下的局部急停隔离 (仅涉事车停下，正常车继续移动，引擎不暂停)
+            var engine = new SimulationEngine(map);
+            var bot1 = new SimulatedRobot(1, 5.0f, 5.0f, 0f, 0.55f);
+            var bot2 = new SimulatedRobot(2, 5.2f, 5.0f, (float)Math.PI, 0.55f); // 与 bot1 贴近重叠
+            var bot3 = new SimulatedRobot(3, 10.0f, 10.0f, 0f, 0.55f);            // 远端正常行驶车
+            bot3.ExecuteCommand(RobotCommand.Move(5f)); // 3 号车下发前进命令
+
+            engine.SetRobots(new[] { bot1, bot2, bot3 });
+            engine.Start();
+
+            // 推进单步触发碰撞
+            var snapshot = engine.Step();
+
+            Assert.IsFalse(engine.IsPaused, "发生局部碰撞后仿真引擎不应被全局强制暂停");
+            Assert.AreEqual(1, engine.CollisionDetector.TotalCollisionCount, "引擎碰撞检测器累计碰撞次数严格为 1");
+            Assert.AreEqual(RobotMotionState.Stopped, bot1.MotionState, "涉事的 1 号车应被就地急停");
+            Assert.AreEqual(RobotMotionState.Stopped, bot2.MotionState, "涉事的 2 号车应被就地急停");
+            Assert.IsTrue(bot3.LinearVelocity > 0f, "未涉事的 3 号车应保持正常运动不受急停干扰");
+        }
+
+        // 场景 33：验证动力学最大制动距离+1格安全前瞻移动闭塞预约与对向避碰停稳
+        [TestMethod]
+        public void Scenario33_DynamicBrakingLookaheadReservationAndSafetyStop()
+        {
+            // 验证基于动力学制动距离加安全冗余的 3 格前瞻移动闭塞锁定机制保证单车全速巡航与对向小车平滑刹停防撞。
+            // singleRobot: 单机测试机器人; singleMc: 单机底层运动控制器; p1: 1 号车规划路径; p2: 2 号车规划路径; mc1: 1 号车运动控制器; mc2: 2 号车运动控制器。
+            var map = new GridMap(20, 20, 0.55f);
+            var engine = new SimulationEngine(map, new SimulationConfig { LookaheadAuthorizationSteps = 3 });
+
+            // 1. 验证单机模式在统一 3 格前瞻授权下可一路滑动绿灯顺利完成到达
+            var singleRobot = new SimulatedRobot(1, new GridPoint(2, 2), 0f, 0.55f);
+            engine.AddRobot(singleRobot);
+            var navResult = engine.NavigateRobot(1, new GridPoint(8, 2));
+            Assert.IsTrue(navResult.Success);
+
+            for (int i = 0; i < 60; i++)
+            {
+                engine.Step();
+            }
+
+            var singleMc = engine.GetMotionController(1);
+            Assert.IsTrue(singleMc.IsPathCompleted, "单机在 3 格滑动闭塞窗口下应顺利巡航到达终点");
+            Assert.AreEqual(new GridPoint(8, 2), singleRobot.ConfirmedGrid);
+
+            // 2. 验证两车同直道对向行驶场景：3 格前瞻闭塞锁阻止对向侵入，双方在安全距离停稳，零碰撞
+            engine.Reset(map);
+            engine.Config.AutoReplanningOnDeadlock = false;
+            var r1 = new SimulatedRobot(1, new GridPoint(2, 5), 0f, 0.55f);
+            var r2 = new SimulatedRobot(2, new GridPoint(8, 5), (float)Math.PI, 0.55f);
+            engine.SetRobots(new[] { r1, r2 });
+
+            var p1 = new List<GridPoint> { new GridPoint(2, 5), new GridPoint(3, 5), new GridPoint(4, 5), new GridPoint(5, 5), new GridPoint(6, 5), new GridPoint(7, 5), new GridPoint(8, 5) };
+            var p2 = new List<GridPoint> { new GridPoint(8, 5), new GridPoint(7, 5), new GridPoint(6, 5), new GridPoint(5, 5), new GridPoint(4, 5), new GridPoint(3, 5), new GridPoint(2, 5) };
+
+            var mc1 = engine.GetMotionController(1);
+            var mc2 = engine.GetMotionController(2);
+            mc1.SetPath(p1, initialAuthorizedIndex: 0);
+            mc2.SetPath(p2, initialAuthorizedIndex: 0);
+
+            engine.Start();
+
+            for (int i = 0; i < 80; i++)
+            {
+                engine.Step();
+            }
+
+            Assert.AreEqual(0, engine.CollisionDetector.TotalCollisionCount, "对向移动闭塞锁定应杜绝任何实体碰撞事故");
+            Assert.IsTrue(r1.Position.DistanceTo(r2.Position) >= 0.50f, "两台车应保持安全间距停稳且杜绝包络干涉碰撞");
+            Assert.AreEqual(RobotMotionState.Stopped, r1.MotionState);
+            Assert.AreEqual(RobotMotionState.Stopped, r2.MotionState);
+        }
+
+        // 场景 34：验证可插拔独立 CBS、ECBS、CA*、WHCA* 各自独立规划与统一接口调度
+        [TestMethod]
+        public void Scenario34_PluggableMultiAgentPlanners_CBS_ECBS_WHCA()
+        {
+            // 验证 CBS、ECBS、CA*、WHCA* 独立规划器实现 IMultiAgentPathPlanner 接口并可自由插拔调度。
+            // map: 仓储地图; tasks: 十字交叉冲突任务列表; ecbsPlanner: 独立ECBS规划器; whcaPlanner: 独立WHCA*规划器; cbsPlanner: 独立CBS规划器; caPlanner: 独立CA*规划器; router: 统一路由门面; app: 门面实例。
+            var map = new GridMap(15, 15, 0.55f);
+            var tasks = new List<AgentTask>
+            {
+                new AgentTask(1, new GridPoint(2, 6), new GridPoint(10, 6)),  // 水平向右穿过 (6, 6)
+                new AgentTask(2, new GridPoint(6, 2), new GridPoint(6, 10))   // 垂直向下穿过 (6, 6)
+            };
+
+            // 1. 验证独立的 EcbsPlanner (增强型冲突搜索)
+            IMultiAgentPathPlanner ecbsPlanner = new EcbsPlanner();
+            var ecbsResult = ecbsPlanner.Plan(map, tasks, new MultiAgentPlanOptions { EcbsSuboptimality = 1.30, TimeoutMilliseconds = 3000 });
+            Assert.IsTrue(ecbsResult.Success, $"ECBS 应成功消解交叉冲突: {ecbsResult.Message}");
+            Assert.AreEqual(2, ecbsResult.AgentPaths.Count);
+            Assert.AreEqual(new GridPoint(2, 6), ecbsResult.AgentPaths[0][0]);
+            Assert.AreEqual(new GridPoint(10, 6), ecbsResult.AgentPaths[0][^1]);
+            Assert.AreEqual(new GridPoint(6, 2), ecbsResult.AgentPaths[1][0]);
+            Assert.AreEqual(new GridPoint(6, 10), ecbsResult.AgentPaths[1][^1]);
+
+            // 2. 验证独立的 WhcaStarPlanner (窗口时空协同 A*)
+            IMultiAgentPathPlanner whcaPlanner = new WhcaStarPlanner();
+            var whcaResult = whcaPlanner.Plan(map, tasks, new MultiAgentPlanOptions { WhcaWindowK = 16, TimeoutMilliseconds = 3000 });
+            Assert.IsTrue(whcaResult.Success, $"WHCA* 应成功规划无冲突时空路径: {whcaResult.Message}");
+            Assert.AreEqual(2, whcaResult.AgentPaths.Count);
+
+            // 3. 验证独立的 CbsPlanner (精确双层冲突搜索)
+            IMultiAgentPathPlanner cbsPlanner = new CbsPlanner();
+            var cbsResult = cbsPlanner.Plan(map, tasks, new MultiAgentPlanOptions { TimeoutMilliseconds = 3000 });
+            Assert.IsTrue(cbsResult.Success, $"CBS 应成功规划最优无冲突时空路径: {cbsResult.Message}");
+            Assert.AreEqual(2, cbsResult.AgentPaths.Count);
+
+            // 4. 验证独立的 CAStarPlanner (协同 A*)
+            IMultiAgentPathPlanner caPlanner = new CAStarPlanner();
+            var caResult = caPlanner.Plan(map, tasks, new MultiAgentPlanOptions { TimeoutMilliseconds = 3000 });
+            Assert.IsTrue(caResult.Success, $"CA* 应成功规划无冲突时空路径: {caResult.Message}");
+            Assert.AreEqual(2, caResult.AgentPaths.Count);
+
+            // 5. 验证统一全局注册中心与动态热插拔扩展
+            Assert.AreEqual(4, MultiAgentPlannerRegistry.GetAll().Count, "注册中心应默认内置 4 大核心规划算法");
+            var registryEcbs = MultiAgentPlannerRegistry.Get("ECBS");
+            Assert.IsNotNull(registryEcbs);
+            Assert.AreEqual("ECBS", registryEcbs.Id);
+
+            // 6. 验证引擎与门面的热插拔特性与动态算法注册
+            var app = new SimulationApp();
+            app.Engine.MultiAgentPathPlanner = new EcbsPlanner(); // 直接面向接口热插拔具体算法
+            var facadeResult = app.PlanMultiAgentPaths(tasks);
+            Assert.IsTrue(facadeResult.Success, "通过门面直接调用多机规划应成功返回结果");
+
+            // 7. 验证注册自定义第三方规划器并被调度
+            var customPlanner = new WhcaStarPlanner();
+            MultiAgentPlannerRegistry.Register(customPlanner);
+            Assert.AreSame(customPlanner, MultiAgentPlannerRegistry.Get("WHCAStar"));
+        }
+
+        // 场景 35：验证死锁检测器构建有向依赖图与自适应在线重规划脱困
+        [TestMethod]
+        public void Scenario35_DeadlockDetectionAndAutonomousReplanningRecovery()
+        {
+            // 验证基于有向依赖图与 DFS 环路搜索的死锁检测精准度以及引擎自主在线重规划解冻脱困机制。
+            // deadlockMgr: 死锁管理器; resMgr: 资源预约管理器; bot1: 1 号机器人; bot2: 2 号机器人; mc1: 1 号运动控制器; mc2: 2 号运动控制器; report: 诊断报告。
+            var map = new GridMap(15, 15, 0.55f);
+            var deadlockMgr = new DeadlockManager { StallThresholdSeconds = 0.5, DeadlockConfirmationSeconds = 0.8 };
+            var resMgr = new GridReservationManager();
+
+            var bot1 = new SimulatedRobot(1, new GridPoint(3, 5), 0f, 0.55f);
+            var bot2 = new SimulatedRobot(2, new GridPoint(4, 5), (float)Math.PI, 0.55f);
+            resMgr.RegisterRobotInitialGrid(1, new GridPoint(3, 5));
+            resMgr.RegisterRobotInitialGrid(2, new GridPoint(4, 5));
+
+            var mc1 = new MotionController(1);
+            var mc2 = new MotionController(2);
+            mc1.SetPath(new[] { new GridPoint(3, 5), new GridPoint(4, 5), new GridPoint(5, 5) }, initialAuthorizedIndex: 0);
+            mc2.SetPath(new[] { new GridPoint(4, 5), new GridPoint(3, 5), new GridPoint(2, 5) }, initialAuthorizedIndex: 0);
+
+            var controllers = new Dictionary<int, MotionController> { [1] = mc1, [2] = mc2 };
+
+            // 1. 模拟停滞时间推进，验证精准检出循环死锁环 1 -> 2 -> 1
+            deadlockMgr.Diagnose(new[] { bot1, bot2 }, resMgr, map, 0.1f, id => controllers[id]); // 记录起始时间
+            deadlockMgr.Diagnose(new[] { bot1, bot2 }, resMgr, map, 0.8f, id => controllers[id]); // 停滞 0.7s >= 0.5s，检出环路开启死锁计时
+            var report = deadlockMgr.Diagnose(new[] { bot1, bot2 }, resMgr, map, 1.8f, id => controllers[id]); // 持续 1.0s >= 0.8s，确认死锁！
+
+            Assert.AreEqual(DeadlockStatus.NeedGlobalReplanning, report.Status, "应成功识别两车对穿互相等待造成的死锁环");
+            Assert.AreEqual(1, report.DeadlockCycles.Count);
+            Assert.IsTrue(report.DeadlockCycles[0].Agents.Contains(1));
+            Assert.IsTrue(report.DeadlockCycles[0].Agents.Contains(2));
+
+            // 2. 验证 SimulationEngine 自主死锁感知与在线协同重规划自愈脱困
+            var engine = new SimulationEngine(map, new SimulationConfig { LookaheadAuthorizationSteps = 3 });
+            engine.DeadlockManager.StallThresholdSeconds = 0.5;
+            engine.DeadlockManager.DeadlockConfirmationSeconds = 0.8;
+
+            var r1 = new SimulatedRobot(1, new GridPoint(3, 5), 0f, 0.55f);
+            var r2 = new SimulatedRobot(2, new GridPoint(4, 5), (float)Math.PI, 0.55f);
+            engine.SetRobots(new[] { r1, r2 });
+
+            var engMc1 = engine.GetMotionController(1);
+            var engMc2 = engine.GetMotionController(2);
+            engMc1.SetPath(new[] { new GridPoint(3, 5), new GridPoint(4, 5), new GridPoint(5, 5) }, initialAuthorizedIndex: 0);
+            engMc2.SetPath(new[] { new GridPoint(4, 5), new GridPoint(3, 5), new GridPoint(2, 5) }, initialAuthorizedIndex: 0);
+
+            engine.Start();
+
+            for (int i = 0; i < 30; i++)
+            {
+                engine.Step();
+            }
+
+            Assert.AreEqual(0, engine.CollisionDetector.TotalCollisionCount, "死锁自主消解全流程中绝不发生碰撞事故");
+            Assert.IsTrue(engMc1.CurrentPath.Count > 0, "1 号车应成功获得重规划新路径");
+            Assert.IsTrue(engMc2.CurrentPath.Count > 0, "2 号车应成功获得重规划新路径");
+        }
+
+        // 场景 36：验证在途机器人被已到站停泊车阻挡时识别 StationaryBlockage 并自主动态绕障重规划
+        [TestMethod]
+        public void Scenario36_StationaryBlockageDetectionAndAutonomousBypassReplanning()
+        {
+            // 验证后车遭遇已到站停泊小车阻挡时自动触发单车动态绕障重规划成功到达目标。
+            // r1: 在途行进小车; r2: 已到站停泊小车; mc1: 1 号运动控制器; mc2: 2 号运动控制器。
+            var map = new GridMap(15, 15, 0.55f);
+            var engine = new SimulationEngine(map, new SimulationConfig { LookaheadAuthorizationSteps = 3 });
+            engine.DeadlockManager.StallThresholdSeconds = 0.3;
+            engine.DeadlockManager.DeadlockConfirmationSeconds = 0.5;
+
+            var r1 = new SimulatedRobot(1, new GridPoint(2, 5), 0f, 0.55f);
+            var r2 = new SimulatedRobot(2, new GridPoint(5, 5), 0f, 0.55f);
+            engine.SetRobots(new[] { r1, r2 });
+
+            var mc1 = engine.GetMotionController(1);
+            var mc2 = engine.GetMotionController(2);
+
+            mc2.SetPath(new[] { new GridPoint(5, 5) }, initialAuthorizedIndex: 0);
+            mc2.ClearPath();
+            Assert.IsTrue(mc2.IsPathCompleted);
+
+            mc1.SetPath(new[] { new GridPoint(2, 5), new GridPoint(3, 5), new GridPoint(4, 5), new GridPoint(5, 5), new GridPoint(6, 5), new GridPoint(7, 5) }, initialAuthorizedIndex: 0);
+
+            engine.Start();
+
+            for (int i = 0; i < 90; i++)
+            {
+                engine.Step();
+            }
+
+            Assert.AreEqual(0, engine.CollisionDetector.TotalCollisionCount, "全流程绝不与停泊车辆发生碰撞");
+            Assert.AreEqual(new GridPoint(5, 5), r2.ConfirmedGrid, "停泊车辆 2 号车始终保持在原位停稳");
+            Assert.IsTrue(mc1.IsPathCompleted, "1 号车应通过自主绕障重规划顺利到达目的地");
+            Assert.AreEqual(new GridPoint(7, 5), r1.ConfirmedGrid, "1 号车最终地标应精准匹配目标点 (7, 5)");
+        }
+
+        // 场景 37：验证碰撞小车物理栅格被后续车辆自动识别为动态障碍物并自动重规划避开
+        [TestMethod]
+        public void Scenario37_CollisionRobotGridTreatedAsDynamicObstacleAndBypassed()
+        {
+            // 验证当小车发生碰撞停稳后其所在物理栅格被后续寻路与重规划列为动态障碍物并成功绕开。
+            // r3: 后续正常行进车辆; mc3: 3 号运动控制器。
+            var map = new GridMap(15, 15, 0.55f);
+            var engine = new SimulationEngine(map, new SimulationConfig { LookaheadAuthorizationSteps = 3 });
+
+            // 1. 构造 1 号车与 2 号车在 (5, 5) 附近发生碰撞并被急停
+            var r1 = new SimulatedRobot(1, 5.0f * 0.55f, 5.0f * 0.55f, 0f, 0.55f);
+            var r2 = new SimulatedRobot(2, 5.2f * 0.55f, 5.0f * 0.55f, (float)Math.PI, 0.55f);
+            var r3 = new SimulatedRobot(3, new GridPoint(2, 5), 0f, 0.55f);
+            engine.SetRobots(new[] { r1, r2, r3 });
+
+            engine.Start();
+            engine.Step();
+
+            Assert.IsTrue(engine.CollisionDetector.TotalCollisionCount > 0, "应触发碰撞事故");
+            Assert.AreEqual(RobotMotionState.Stopped, r1.MotionState);
+            Assert.AreEqual(RobotMotionState.Stopped, r2.MotionState);
+            Assert.IsTrue(r1.HasCollided, "发生碰撞的 1 号车应被标记 HasCollided");
+            Assert.IsTrue(r2.HasCollided, "发生碰撞的 2 号车应被标记 HasCollided");
+            Assert.IsFalse(r3.HasCollided, "未碰撞的 3 号车不应被标记 HasCollided");
+
+            var snapshotBefore = engine.BuildSnapshot();
+            Assert.IsTrue(snapshotBefore.Robots.First(rb => rb.Id == 1).HasCollided, "快照中 1 号车应为碰撞状态以绘制红色徽标");
+
+            // 2. 验证 GetImpassableGrids 成功收集碰撞小车的栅格位置 (5, 5)
+            var impassable = engine.GetImpassableGrids(3);
+            Assert.IsTrue(impassable.Contains(new GridPoint(5, 5)), "碰撞小车的物理栅格 (5, 5) 必须被列入不可通行网格集合");
+
+            // 3. 为 3 号车下发目标 (8, 5) (原直接路径穿过事故现场 (5, 5))
+            var navRes = engine.NavigateRobot(3, new GridPoint(8, 5));
+            Assert.IsTrue(navRes.Success, "3 号车应成功规划出绕行路线");
+            Assert.IsFalse(navRes.Path.Contains(new GridPoint(5, 5)), "规划路线绝对不应包含事故车辆停驻的栅格 (5, 5)");
+
+            var mc3 = engine.GetMotionController(3);
+
+            for (int i = 0; i < 160 && !mc3.IsPathCompleted; i++)
+            {
+                engine.Step();
+            }
+
+            Assert.IsTrue(mc3.IsPathCompleted, "3 号车应顺利到达终点");
+            Assert.AreEqual(new GridPoint(8, 5), r3.ConfirmedGrid, "3 号车最终地标应精准匹配目标点 (8, 5)");
+
+            // 5. 验证重设目标点时碰撞计数自动清零与小车碰撞标记复位
+            var newNav = engine.NavigateRobot(3, new GridPoint(8, 2));
+            Assert.IsTrue(newNav.Success);
+            Assert.AreEqual(0, engine.CollisionDetector.TotalCollisionCount, "重置/重设目标点时碰撞次数必须严格置零");
+            Assert.IsFalse(r1.HasCollided, "重设目标点后小车碰撞状态应复位");
+            Assert.AreEqual(4, new SimulationConfig().LookaheadAuthorizationSteps, "默认前瞻安全步数应为 4 格 (制动 2 格 + 安全 2 格)");
+        }
+
+        // 场景 38：验证死锁环外围破环牺牲者评估与外围单车优先解脱机制
+        [TestMethod]
+        public void Scenario38_DeadlockVictimSelectionAndOuterSingleRobotBreakCycle()
+        {
+            // 验证基于自由度与外围拓扑的最优破环牺牲者评估以及单车极速切环疏通整个死锁机群。
+            // r1: 被围内层小车; r2: 对向内层小车; r3: 外围拥有侧向空闲通道的边缘小车。
+            var map = new GridMap(20, 20, 0.55f);
+            var engine = new SimulationEngine(map, new SimulationConfig { LookaheadAuthorizationSteps = 3 });
+            engine.DeadlockManager.StallThresholdSeconds = 0.3;
+            engine.DeadlockManager.DeadlockConfirmationSeconds = 0.4;
+
+            var r1 = new SimulatedRobot(1, new GridPoint(5, 5), 0f, 0.55f);
+            var r2 = new SimulatedRobot(2, new GridPoint(6, 5), (float)Math.PI, 0.55f);
+            var r3 = new SimulatedRobot(3, new GridPoint(6, 6), -(float)Math.PI * 0.5f, 0.55f);
+            engine.SetRobots(new[] { r1, r2, r3 });
+
+            var mc1 = engine.GetMotionController(1);
+            var mc2 = engine.GetMotionController(2);
+            var mc3 = engine.GetMotionController(3);
+
+            mc1.SetPath(new[] { new GridPoint(5, 5), new GridPoint(6, 5), new GridPoint(7, 5) }, initialAuthorizedIndex: 0);
+            mc2.SetPath(new[] { new GridPoint(6, 5), new GridPoint(6, 6), new GridPoint(6, 7) }, initialAuthorizedIndex: 0);
+            mc3.SetPath(new[] { new GridPoint(6, 6), new GridPoint(5, 6), new GridPoint(5, 5), new GridPoint(4, 5) }, initialAuthorizedIndex: 0);
+
+            engine.Start();
+
+            for (int i = 0; i < 50; i++)
+            {
+                engine.Step();
+            }
+
+            // 验证在推进过程中死锁被检测到，且成功执行了外围单车破环重规划
+            bool victimBreakLogged = engine.LatestSnapshot.LogEvents.Any(l => l.Contains("外围单车破环成功"));
+            Assert.IsTrue(victimBreakLogged, "必须成功触发并执行外围单车破环重规划");
+            Assert.AreEqual(0, engine.CollisionDetector.TotalCollisionCount, "破环全流程绝不发生碰撞事故");
         }
     }
 }

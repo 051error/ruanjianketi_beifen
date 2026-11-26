@@ -24,8 +24,12 @@ namespace WarehouseGridSimulation.Core.Engine
         public GridMap Map { get; private set; }
         public TaskManager TaskManager { get; }
         public IPathPlanner PathPlanner { get; set; }
+        public IMultiAgentPathPlanner MultiAgentPathPlanner { get; set; }
         public GridReservationManager ReservationManager { get; }
         public CollisionDetector CollisionDetector { get; }
+        public DeadlockManager DeadlockManager { get; }
+        public DeadlockDiagnosticReport LatestDeadlockReport { get; private set; }
+        private float _lastDeadlockCheckTime = -1f;
 
         public IReadOnlyList<SimulatedRobot> Robots => _robots;
         private readonly List<SimulatedRobot> _robots = new List<SimulatedRobot>();
@@ -54,8 +58,10 @@ namespace WarehouseGridSimulation.Core.Engine
             Map = map ?? throw new ArgumentNullException(nameof(map));
             TaskManager = new TaskManager();
             PathPlanner = new AStarPlanner();
+            MultiAgentPathPlanner = new MultiAgentPathPlanner();
             ReservationManager = new GridReservationManager();
             CollisionDetector = new CollisionDetector();
+            DeadlockManager = new DeadlockManager();
 
             ReservationManager.LongWaitDetected += OnLongWaitWarning;
         }
@@ -180,7 +186,8 @@ namespace WarehouseGridSimulation.Core.Engine
                     return NavigationResult.Fail("未配置有效的路径规划算法");
                 }
 
-                var planResult = planner.PlanPath(Map, startGrid, target);
+                var impassable = GetImpassableGrids(robotId);
+                var planResult = planner.PlanPath(Map, startGrid, target, pt => pt != target && impassable.Contains(pt));
                 if (!planResult.Success || planResult.Path == null || planResult.Path.Count == 0)
                 {
                     return NavigationResult.Fail(string.IsNullOrEmpty(planResult.ErrorMessage) ? "未找到到达目标点的连通路径！" : planResult.ErrorMessage);
@@ -190,11 +197,11 @@ namespace WarehouseGridSimulation.Core.Engine
                 ReservationManager.ReleaseRobotReservations(robotId, startGrid);
 
                 int startTargetIdx = isOffCenter ? 0 : 1;
-                controller.SetPath(planResult.Path, initialAuthorizedIndex: planResult.Path.Count - 1, startTargetIndex: startTargetIdx);
 
-                // 单机模式下同步在管理器中锁定新路径全部预约资源
+                // 单机独占模式下全量锁定目标路径，多机调度模式下由 3 格动力学移动闭塞窗口动态申请
                 if (_robots.Count <= 1)
                 {
+                    controller.SetPath(planResult.Path, initialAuthorizedIndex: planResult.Path.Count - 1, startTargetIndex: startTargetIdx);
                     for (int i = 0; i < planResult.Path.Count - 1; i++)
                     {
                         var from = planResult.Path[i];
@@ -202,11 +209,36 @@ namespace WarehouseGridSimulation.Core.Engine
                         ReservationManager.TryAcquireStepAuthorization(robotId, from, to, out _);
                     }
                 }
+                else
+                {
+                    controller.SetPath(planResult.Path, initialAuthorizedIndex: 0, startTargetIndex: startTargetIdx);
+                    int lookaheadSteps = Config.LookaheadAuthorizationSteps;
+                    while (controller.AuthorizedIndex < controller.CurrentPath.Count - 1 &&
+                           controller.AuthorizedIndex < controller.CurrentTargetIndex + lookaheadSteps)
+                    {
+                        int fromIndex = controller.AuthorizedIndex;
+                        int toIndex = fromIndex + 1;
+                        GridPoint fromGrid = controller.CurrentPath[fromIndex];
+                        GridPoint toGrid = controller.CurrentPath[toIndex];
+
+                        if (ReservationManager.TryAcquireStepAuthorization(robotId, fromGrid, toGrid, out _))
+                        {
+                            controller.UpdateAuthorization(toIndex);
+                        }
+                        else
+                        {
+                            break;
+                        }
+                    }
+                }
 
                 if (!IsRunning || IsPaused)
                 {
                     Start();
                 }
+
+                // 每次重设目标点将碰撞统计置零
+                ResetCollisionStats();
 
                 PublishSnapshot();
                 return NavigationResult.Ok(planResult.Path, $"成功启动导航 -> [{target.X}, {target.Y}]");
@@ -235,6 +267,18 @@ namespace WarehouseGridSimulation.Core.Engine
             }
         }
 
+        public MultiAgentPlanResult PlanMultiAgentPaths(IReadOnlyList<AgentTask> tasks, MultiAgentPlanOptions options = null)
+        {
+            // 为多机器人机群规划无时空冲突的协同路径。
+            // tasks: 各智能体起终点任务列表; options: 可选的多机规划参数。
+            lock (_stateLock)
+            {
+                if (Map == null) return MultiAgentPlanResult.Fail("地图未初始化");
+                if (MultiAgentPathPlanner == null) return MultiAgentPlanResult.Fail("未配置多智能体路径规划器");
+                return MultiAgentPathPlanner.Plan(Map, tasks, options);
+            }
+        }
+
         public void SetRobots(IEnumerable<SimulatedRobot> robots)
         {
             // 重新批量部署并配置仿真机群。
@@ -248,11 +292,14 @@ namespace WarehouseGridSimulation.Core.Engine
                 {
                     foreach (var r in robots)
                     {
+                        r.HasCollided = false;
                         _robots.Add(r);
                         _motionControllers[r.Id] = new MotionController(r.Id);
                         ReservationManager.RegisterRobotInitialGrid(r.Id, r.GridPosition);
                     }
                 }
+                CollisionDetector.Reset();
+                _recentCollisions.Clear();
                 PublishSnapshot();
             }
         }
@@ -308,6 +355,10 @@ namespace WarehouseGridSimulation.Core.Engine
                 _eventLogs.Clear();
                 _recentCollisions.Clear();
                 ReservationManager.Clear();
+                CollisionDetector.Reset();
+                DeadlockManager.Reset();
+                LatestDeadlockReport = null;
+                _lastDeadlockCheckTime = -1f;
                 TaskManager.Clear();
                 _motionControllers.Clear();
                 _robots.Clear();
@@ -389,8 +440,7 @@ namespace WarehouseGridSimulation.Core.Engine
             {
                 if (_motionControllers.TryGetValue(robot.Id, out var controller) && controller.HasPath && !controller.IsPathCompleted)
                 {
-                    // 检查是否需要申请前方栅格与边的通行授权
-                    // 单机无冲突场景全量预看授权以实现全速巡航，多机场景受预看步数防死锁约束
+                    // 单机场景全量预看以实现极速巡航，多机场景采用动力学最大制动距离+1格安全冗余 (3格移动闭塞)
                     int lookaheadSteps = (_robots.Count <= 1) ? 9999 : Config.LookaheadAuthorizationSteps;
                     while (controller.AuthorizedIndex < controller.CurrentPath.Count - 1 &&
                            controller.AuthorizedIndex < controller.CurrentTargetIndex + lookaheadSteps)
@@ -413,6 +463,24 @@ namespace WarehouseGridSimulation.Core.Engine
                 }
             }
 
+            // 步骤 4.1：周期性死锁拓扑诊断与在线协同重规划自主消解
+            if (_robots.Count > 1 && (SimulationTime - _lastDeadlockCheckTime >= 0.2f || _lastDeadlockCheckTime < 0f))
+            {
+                _lastDeadlockCheckTime = SimulationTime;
+                LatestDeadlockReport = DeadlockManager.Diagnose(_robots, ReservationManager, Map, SimulationTime, id => GetMotionController(id));
+                if (Config.AutoReplanningOnDeadlock)
+                {
+                    if (LatestDeadlockReport.Status == DeadlockStatus.NeedGlobalReplanning)
+                    {
+                        TryResolveDeadlockByReplanning(LatestDeadlockReport);
+                    }
+                    else if (LatestDeadlockReport.Status == DeadlockStatus.StationaryBlockage)
+                    {
+                        TryResolveStationaryBlockageByReplanning(LatestDeadlockReport);
+                    }
+                }
+            }
+
             // 步骤 5：生成机器人基础指令 (仅在拥有活动导航路径时由控制器下发指令，否则保留外部直接下发的手动控制信号)
             foreach (var robot in _robots)
             {
@@ -429,25 +497,18 @@ namespace WarehouseGridSimulation.Core.Engine
                 robot.Step(dt, cellSize);
             }
 
-            // 步骤 7：独立碰撞检测 (与交通预约分离)
-            var collisions = CollisionDetector.CheckCollisions(SimulationTime, _robots, Map);
-            if (collisions.Count > 0)
+            // 步骤 7：独立碰撞检测与局部急停隔离 (保持引擎调度简洁明了)
+            var newCollisions = CollisionDetector.UpdateCollisions(SimulationTime, _robots, Map);
+            foreach (var col in newCollisions)
             {
-                foreach (var col in collisions)
-                {
-                    _recentCollisions.Add(col);
-                    Log(col.ToString());
-                    CollisionOccurred?.Invoke(col);
-                }
+                _recentCollisions.Add(col);
+                Log(col.ToString());
+                CollisionOccurred?.Invoke(col);
 
-                if (Config.AutoPauseOnCollision)
+                StopInvolvedRobot(col.RobotId1);
+                if (col.RobotId2.HasValue)
                 {
-                    foreach (var robot in _robots)
-                    {
-                        robot.EmergencyStop();
-                    }
-                    IsPaused = true;
-                    Log("[安全保护] 检测到实体碰撞风险，仿真自动安全暂停");
+                    StopInvolvedRobot(col.RobotId2.Value);
                 }
             }
 
@@ -535,6 +596,7 @@ namespace WarehouseGridSimulation.Core.Engine
                     MotionState = r.MotionState,
                     HasCargo = r.HasCargo,
                     CurrentTaskId = r.CurrentTaskId,
+                    HasCollided = r.HasCollided,
                     CurrentPath = mc?.CurrentPath?.ToList() ?? new List<GridPoint>(),
                     CurrentTargetIndex = mc?.CurrentTargetIndex ?? 0,
                     TargetGrid = mc?.CurrentTargetGrid,
@@ -568,6 +630,9 @@ namespace WarehouseGridSimulation.Core.Engine
                 SimulationTime = SimulationTime,
                 IsRunning = IsRunning,
                 IsPaused = IsPaused,
+                TotalCollisionCount = CollisionDetector.TotalCollisionCount,
+                IsDeadlockActive = LatestDeadlockReport?.IsDeadlockActive ?? false,
+                DeadlockInfo = LatestDeadlockReport?.ResolutionDetails ?? string.Empty,
                 Robots = robotSnapshots,
                 Tasks = taskSnapshots,
                 OccupiedGrids = occupiedCopy,
@@ -575,6 +640,230 @@ namespace WarehouseGridSimulation.Core.Engine
                 CollisionEvents = collisionsCopy,
                 LogEvents = logsCopy
             };
+        }
+
+        private bool TryResolveDeadlockByReplanning(DeadlockDiagnosticReport report)
+        {
+            // 检测到死锁环时优先调度外围单车自主破环避让，失败时后备执行多智能体协同重规划。
+            // report: 死锁诊断分析报告。
+            if (report?.DeadlockCycles == null || report.DeadlockCycles.Count == 0 || MultiAgentPathPlanner == null)
+            {
+                return false;
+            }
+
+            // -------------------------------------------------------------
+            // 第一级脱困策略：外围单车极速切环 (Victim Selection，耗时 < 1ms)
+            // -------------------------------------------------------------
+            foreach (var cycle in report.DeadlockCycles)
+            {
+                int victimId = cycle.BestVictimAgentId;
+                if (victimId > 0 && PathPlanner != null)
+                {
+                    var victimRobot = GetRobot(victimId);
+                    var victimMc = GetMotionController(victimId);
+                    if (victimRobot != null && victimMc != null && victimMc.HasPath && victimMc.CurrentPath.Count > 0)
+                    {
+                        var target = victimMc.CurrentPath[^1];
+
+                        var blockedByOthers = new HashSet<GridPoint>(GetImpassableGrids(victimId));
+                        foreach (int otherId in cycle.Agents)
+                        {
+                            if (otherId != victimId)
+                            {
+                                var otherRobot = GetRobot(otherId);
+                                if (otherRobot != null) blockedByOthers.Add(otherRobot.ConfirmedGrid);
+                            }
+                        }
+
+                        var singleResult = PathPlanner.PlanPath(Map, victimRobot.ConfirmedGrid, target, pt => pt != target && blockedByOthers.Contains(pt));
+                        if (singleResult.Success && singleResult.Path != null && singleResult.Path.Count > 0)
+                        {
+                            ReservationManager.ReleaseRobotReservations(victimId, victimRobot.ConfirmedGrid);
+                            victimMc.SetPath(singleResult.Path, initialAuthorizedIndex: 0);
+
+                            DeadlockManager.Reset();
+                            _lastDeadlockCheckTime = SimulationTime;
+                            Log($"[外围单车破环成功] 成功调度外围边缘小车 #{victimId} 侧向避让，死锁环瞬间打破，机群全线自发疏通！");
+                            return true;
+                        }
+                    }
+                }
+            }
+
+            // -------------------------------------------------------------
+            // 第二级脱困策略：后备局部多智能体时空协同重规划 (ECBS/WHCA*)
+            // -------------------------------------------------------------
+            var involvedRobotIds = new HashSet<int>();
+            foreach (var cycle in report.DeadlockCycles)
+            {
+                foreach (int rId in cycle.Agents)
+                {
+                    involvedRobotIds.Add(rId);
+                }
+            }
+
+            var replanTasks = new List<AgentTask>();
+            var replanRobots = new List<SimulatedRobot>();
+            foreach (int rId in involvedRobotIds)
+            {
+                var r = GetRobot(rId);
+                var mc = GetMotionController(rId);
+                if (r != null && mc != null && mc.HasPath && mc.CurrentPath.Count > 0)
+                {
+                    var target = mc.CurrentPath[^1];
+                    replanTasks.Add(new AgentTask(r.Id, r.ConfirmedGrid, target));
+                    replanRobots.Add(r);
+                }
+            }
+
+            if (replanTasks.Count < 2) return false;
+
+            Log($"[死锁诊断] {report.ResolutionDetails}，正在启动在线协同重规划...");
+            var blockedGrids = GetImpassableGrids();
+            var replanResult = MultiAgentPathPlanner.Plan(Map, replanTasks, new MultiAgentPlanOptions
+            {
+                TimeoutMilliseconds = 1500,
+                WhcaWindowK = 18,
+                EcbsSuboptimality = 1.30,
+                IsDynamicBlocked = pt => blockedGrids.Contains(pt)
+            });
+
+            if (replanResult.Success && replanResult.AgentPaths != null && replanResult.AgentPaths.Count == replanRobots.Count)
+            {
+                for (int i = 0; i < replanRobots.Count; i++)
+                {
+                    var r = replanRobots[i];
+                    var newPath = replanResult.AgentPaths[i];
+                    ReservationManager.ReleaseRobotReservations(r.Id, r.ConfirmedGrid);
+                    var mc = GetMotionController(r.Id);
+                    mc?.SetPath(newPath, initialAuthorizedIndex: 0);
+                }
+
+                DeadlockManager.Reset();
+                _lastDeadlockCheckTime = SimulationTime;
+                Log($"[死锁消解成功] 全局时空协同重规划成功 ({replanResult.ElapsedMilliseconds}ms)，机群重新解冻推进！");
+                return true;
+            }
+            else
+            {
+                Log($"[死锁告警] 在线协同重规划无解，触发安全就地制动防死锁！");
+                foreach (var r in replanRobots)
+                {
+                    r.ExecuteCommand(RobotCommand.Brake());
+                }
+                return false;
+            }
+        }
+
+        public HashSet<GridPoint> GetImpassableGrids(int? excludeRobotId = null)
+        {
+            // 提取全图所有已碰撞急停、到站停靠或故障失能机器人的物理包络侵占网格集合。
+            // excludeRobotId: 需排除的自身机器人编号。
+            var blockedGrids = new HashSet<GridPoint>();
+            float cellSize = Map?.CellSizeMeters ?? 0.55f;
+            int width = Map?.Width ?? 30;
+            int height = Map?.Height ?? 30;
+
+            foreach (var r in _robots)
+            {
+                if (excludeRobotId.HasValue && r.Id == excludeRobotId.Value) continue;
+
+                bool isStationary = r.LinearVelocity <= 0.05f;
+                bool isStoppedOrFailed = r.MotionState == RobotMotionState.Stopped;
+                bool isPathDone = _motionControllers.TryGetValue(r.Id, out var mc) && (mc.IsPathCompleted || mc.CurrentPath.Count == 0);
+
+                if (isStationary && (isStoppedOrFailed || isPathDone))
+                {
+                    blockedGrids.Add(r.ConfirmedGrid);
+
+                    // 物理包络全覆盖：根据机器人真实坐标与碰撞包络半径，提取车身侵占的所有相邻网格
+                    float rRadius = r.Config?.CollisionRadius ?? 0.25f;
+                    int minGx = Math.Max(0, (int)Math.Floor((r.Position.X - rRadius) / cellSize));
+                    int maxGx = Math.Min(width - 1, (int)Math.Floor((r.Position.X + rRadius) / cellSize));
+                    int minGy = Math.Max(0, (int)Math.Floor((r.Position.Y - rRadius) / cellSize));
+                    int maxGy = Math.Min(height - 1, (int)Math.Floor((r.Position.Y + rRadius) / cellSize));
+
+                    for (int gx = minGx; gx <= maxGx; gx++)
+                    {
+                        for (int gy = minGy; gy <= maxGy; gy++)
+                        {
+                            blockedGrids.Add(new GridPoint(gx, gy));
+                        }
+                    }
+                }
+            }
+            return blockedGrids;
+        }
+
+        private bool TryResolveStationaryBlockageByReplanning(DeadlockDiagnosticReport report)
+        {
+            // 当在途机器人被已到站停靠的静止小车阻塞时自动为受阻车辆执行单车动态绕障重规划。
+            // report: 死锁诊断分析报告。
+            if (report?.StationaryBlockedAgents == null || report.StationaryBlockedAgents.Count == 0 || PathPlanner == null)
+            {
+                return false;
+            }
+
+            bool anyReplanned = false;
+            var parkedGrids = GetImpassableGrids();
+
+            foreach (int blockedId in report.StationaryBlockedAgents)
+            {
+                var r = GetRobot(blockedId);
+                var mc = GetMotionController(blockedId);
+                if (r == null || mc == null || !mc.HasPath || mc.CurrentPath.Count == 0) continue;
+
+                var goal = mc.CurrentPath[^1];
+                var planResult = PathPlanner.PlanPath(Map, r.ConfirmedGrid, goal, pt => pt != goal && parkedGrids.Contains(pt));
+                if (planResult.Success && planResult.Path != null && planResult.Path.Count > 0)
+                {
+                    ReservationManager.ReleaseRobotReservations(r.Id, r.ConfirmedGrid);
+                    mc.SetPath(planResult.Path, initialAuthorizedIndex: 0);
+                    Log($"[自主绕障重规划] 机器人 #{r.Id} 成功重新规划避障路径绕开停泊车 -> [{goal.X}, {goal.Y}]！");
+                    anyReplanned = true;
+                }
+                else
+                {
+                    Log($"[避障重规划受阻] 机器人 #{r.Id} 周围无可行绕行通道，就地等待安全释放！");
+                }
+            }
+
+            if (anyReplanned)
+            {
+                DeadlockManager.Reset();
+                _lastDeadlockCheckTime = SimulationTime;
+            }
+            return anyReplanned;
+        }
+
+        private void StopInvolvedRobot(int robotId)
+        {
+            // 对发生碰撞的涉事机器人执行局部安全急停并释放前方未通行预约。
+            var robot = GetRobot(robotId);
+            if (robot == null) return;
+
+            robot.HasCollided = true;
+            robot.EmergencyStop();
+            if (_motionControllers.TryGetValue(robotId, out var controller))
+            {
+                controller.ClearPath();
+            }
+            ReservationManager.ReleaseRobotReservations(robotId, robot.ConfirmedGrid);
+        }
+
+        public void ResetCollisionStats()
+        {
+            // 重置碰撞检测器、清空碰撞历史记录并将所有小车的碰撞状态置零。
+            lock (_stateLock)
+            {
+                CollisionDetector.Reset();
+                _recentCollisions.Clear();
+                foreach (var r in _robots)
+                {
+                    r.HasCollided = false;
+                }
+                PublishSnapshot();
+            }
         }
 
         public void Log(string message)

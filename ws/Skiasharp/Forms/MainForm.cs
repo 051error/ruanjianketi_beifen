@@ -45,7 +45,8 @@ namespace WarehouseGridSimulation.Skia.Forms
         private double _averageFrameSeconds;
         private bool _interpolateCurrentStep;
 
-        // 单机手动控制长按状态 (按钮与键盘按键完全同步)
+        // 手动控制长按状态与受控机器人选择 (按钮与键盘按键完全同步，支持单机与多机点选)
+        private int? _selectedRobotId = 1;
         private bool _isManualForwardActive = false;
         private bool _isManualTurnLeftActive = false;
         private bool _isManualTurnRightActive = false;
@@ -90,6 +91,12 @@ namespace WarehouseGridSimulation.Skia.Forms
             KeyPreview = true;
 
             InitializeControls();
+            if (_cmbMultiAlgorithm != null)
+            {
+                _cmbMultiAlgorithm.DisplayMember = "Name";
+                _cmbMultiAlgorithm.ValueMember = "Id";
+                _cmbMultiAlgorithm.DataSource = MultiAgentPlannerRegistry.GetAll().ToList();
+            }
             BuildSkiaButtons();
 
             _stopwatch = Stopwatch.StartNew();
@@ -141,9 +148,11 @@ namespace WarehouseGridSimulation.Skia.Forms
                     }
                     _multiRobotPresenter?.GenerateRandomRobots(defaultCount);
                 }
+                _selectedRobotId = _app.Engine?.Robots?.FirstOrDefault()?.Id ?? 1;
             }
             else
             {
+                _selectedRobotId = 1;
                 _singleRobotPresenter?.ResetTarget();
                 _multiRobotPresenter?.ClearTargets();
                 HandleResetPosition();
@@ -180,7 +189,16 @@ namespace WarehouseGridSimulation.Skia.Forms
         private void HandleStartMultiNavigation()
         {
             // 启动多机协同调度导航任务。
-            _multiRobotPresenter?.HandleStartMultiNavigation(this);
+            var selectedPlanner = _cmbMultiAlgorithm?.SelectedItem as IMultiAgentPathPlanner
+                ?? MultiAgentPlannerRegistry.Default;
+
+            var options = new MultiAgentPlanOptions
+            {
+                WhcaWindowK = (int)(_numWhcaK?.Value ?? 18),
+                EcbsSuboptimality = (double)(_numEcbsW?.Value ?? 1.30m),
+                TimeoutMilliseconds = 4000
+            };
+            _multiRobotPresenter?.HandleStartMultiNavigation(this, selectedPlanner, options);
             _skiaCanvas?.Invalidate();
         }
 
@@ -289,108 +307,39 @@ namespace WarehouseGridSimulation.Skia.Forms
             _skiaCanvas?.Invalidate();
         }
 
-        private void SetManualForward(bool active)
+        private void SetManualDrive(ManualDriveAction action, bool active)
         {
-            // 设置单机调度模式下手动前进的长按激活与释放减速停止状态。
-            // active: 手动控制输入是否处于按下激活状态。
-            if (_currentMode != SimulationMode.SingleRobot) return;
-            var r = _app.Engine?.Robots?.FirstOrDefault();
-            if (r == null) return;
+            // 向当前选定的机器人统一分发手动长按或释放制动信号。
+            // action: 手动驾驶动作类型; active: 控制信号是否处于按下激活状态。
+            switch (action)
+            {
+                case ManualDriveAction.Forward: _isManualForwardActive = active; break;
+                case ManualDriveAction.TurnLeft: _isManualTurnLeftActive = active; break;
+                case ManualDriveAction.TurnRight: _isManualTurnRightActive = active; break;
+            }
 
-            _isManualForwardActive = active;
-            if (active)
-            {
-                // 转向与前进严格互斥：自旋未静止前拒绝接收前进位移
-                if (Math.Abs(r.AngularVelocity) <= 0.02f)
-                {
-                    var mc = _app.Engine.GetMotionController(r.Id);
-                    mc?.ClearPath();
-                    _app.Engine.ReservationManager.ReleaseRobotReservations(r.Id, r.ConfirmedGrid);
-                    r.ExecuteCommand(RobotCommand.MoveForward);
-                    if (!_app.Engine.IsRunning || _app.Engine.IsPaused) _app.Engine.Start();
-                }
-            }
-            else
-            {
-                if (!_isManualTurnLeftActive && !_isManualTurnRightActive)
-                {
-                    r.ExecuteCommand(RobotCommand.Brake());
-                }
-            }
+            int targetId = _selectedRobotId ?? _app.Engine?.Robots?.FirstOrDefault()?.Id ?? 1;
+            _app.ManualDriveRobot(targetId, action, active);
             _skiaCanvas?.Invalidate();
         }
 
-        private void SetManualTurnLeft(bool active)
-        {
-            // 设置单机调度模式下手动逆时针自旋的长按激活与释放减速停止状态。
-            if (_currentMode != SimulationMode.SingleRobot) return;
-            var r = _app.Engine?.Robots?.FirstOrDefault();
-            if (r == null) return;
-
-            _isManualTurnLeftActive = active;
-            if (active)
-            {
-                // 转向与前进严格互斥：线速度未静止前拒绝接收自旋角度
-                if (r.LinearVelocity <= r.Config.SpeedTolerance)
-                {
-                    var mc = _app.Engine.GetMotionController(r.Id);
-                    mc?.ClearPath();
-                    _app.Engine.ReservationManager.ReleaseRobotReservations(r.Id, r.ConfirmedGrid);
-                    r.ExecuteCommand(RobotCommand.Rotate(-float.MaxValue));
-                    if (!_app.Engine.IsRunning || _app.Engine.IsPaused) _app.Engine.Start();
-                }
-            }
-            else
-            {
-                if (!_isManualForwardActive && !_isManualTurnRightActive)
-                {
-                    r.ExecuteCommand(RobotCommand.Brake());
-                }
-            }
-            _skiaCanvas?.Invalidate();
-        }
-
-        private void SetManualTurnRight(bool active)
-        {
-            // 设置单机调度模式下手动顺时针自旋的长按激活与释放减速停止状态。
-            if (_currentMode != SimulationMode.SingleRobot) return;
-            var r = _app.Engine?.Robots?.FirstOrDefault();
-            if (r == null) return;
-
-            _isManualTurnRightActive = active;
-            if (active)
-            {
-                // 转向与前进严格互斥：线速度未静止前拒绝接收自旋角度
-                if (r.LinearVelocity <= r.Config.SpeedTolerance)
-                {
-                    var mc = _app.Engine.GetMotionController(r.Id);
-                    mc?.ClearPath();
-                    _app.Engine.ReservationManager.ReleaseRobotReservations(r.Id, r.ConfirmedGrid);
-                    r.ExecuteCommand(RobotCommand.Rotate(float.MaxValue));
-                    if (!_app.Engine.IsRunning || _app.Engine.IsPaused) _app.Engine.Start();
-                }
-            }
-            else
-            {
-                if (!_isManualForwardActive && !_isManualTurnLeftActive)
-                {
-                    r.ExecuteCommand(RobotCommand.Brake());
-                }
-            }
-            _skiaCanvas?.Invalidate();
-        }
+        private void SetManualForward(bool active) => SetManualDrive(ManualDriveAction.Forward, active);
+        private void SetManualTurnLeft(bool active) => SetManualDrive(ManualDriveAction.TurnLeft, active);
+        private void SetManualTurnRight(bool active) => SetManualDrive(ManualDriveAction.TurnRight, active);
 
         private void HandleResetPosition()
         {
-            // 将机器人复位到地图正中央。
+            // 将机器人复位到地图默认初始位姿。
             var r = _app.Engine?.Robots?.FirstOrDefault();
             if (r == null) return;
 
             var mc = _app.Engine.GetMotionController(r.Id);
             mc?.ClearPath();
 
-            float centerCoordX = (14 + 0.5f) * _app.CurrentMap.CellSizeMeters;
-            float centerCoordY = (14 + 0.5f) * _app.CurrentMap.CellSizeMeters;
+            int initX = _app.CurrentMapData?.InitialRobots?.FirstOrDefault()?.X ?? 15;
+            int initY = _app.CurrentMapData?.InitialRobots?.FirstOrDefault()?.Y ?? 27;
+            float centerCoordX = (initX + 0.5f) * _app.CurrentMap.CellSizeMeters;
+            float centerCoordY = (initY + 0.5f) * _app.CurrentMap.CellSizeMeters;
             r.TeleportForReset(new Pose2D(centerCoordX, centerCoordY, -(float)Math.PI * 0.5f));
             _app.Engine.PublishSnapshot();
             _interpolateCurrentStep = false;
@@ -398,7 +347,7 @@ namespace WarehouseGridSimulation.Skia.Forms
             _singleRobotPresenter?.ResetTarget();
             if (_lblTargetInfo != null)
             {
-                _lblTargetInfo.Text = "已复位到中心 (14, 14)";
+                _lblTargetInfo.Text = $"已复位到初始位 [{initX}, {initY}]";
                 _lblTargetInfo.ForeColor = Color.FromArgb(120, 130, 140);
             }
             _skiaCanvas?.Invalidate();
@@ -663,35 +612,11 @@ namespace WarehouseGridSimulation.Skia.Forms
 
             if (elapsed > 0.2) elapsed = 0.2; // 避免切后台大卡顿时跳步过多
 
-            // 单机模式下长按手动运动信号持续维持推进
-            if (_currentMode == SimulationMode.SingleRobot)
-            {
-                var r0 = _app.Engine?.Robots?.FirstOrDefault();
-                if (r0 != null)
-                {
-                    if (_isManualForwardActive && Math.Abs(r0.AngularVelocity) <= 0.02f)
-                    {
-                        var mc = _app.Engine.GetMotionController(r0.Id);
-                        mc?.ClearPath();
-                        r0.ExecuteCommand(RobotCommand.MoveForward);
-                        if (!_app.Engine.IsRunning || _app.Engine.IsPaused) _app.Engine.Start();
-                    }
-                    else if (_isManualTurnLeftActive && r0.LinearVelocity <= r0.Config.SpeedTolerance)
-                    {
-                        var mc = _app.Engine.GetMotionController(r0.Id);
-                        mc?.ClearPath();
-                        r0.ExecuteCommand(RobotCommand.Rotate(-float.MaxValue));
-                        if (!_app.Engine.IsRunning || _app.Engine.IsPaused) _app.Engine.Start();
-                    }
-                    else if (_isManualTurnRightActive && r0.LinearVelocity <= r0.Config.SpeedTolerance)
-                    {
-                        var mc = _app.Engine.GetMotionController(r0.Id);
-                        mc?.ClearPath();
-                        r0.ExecuteCommand(RobotCommand.Rotate(float.MaxValue));
-                        if (!_app.Engine.IsRunning || _app.Engine.IsPaused) _app.Engine.Start();
-                    }
-                }
-            }
+            // 长按手动驾驶信号持续维持推进
+            int activeId = _selectedRobotId ?? _app.Engine?.Robots?.FirstOrDefault()?.Id ?? 1;
+            if (_isManualForwardActive) _app.MaintainManualDrive(activeId, ManualDriveAction.Forward);
+            else if (_isManualTurnLeftActive) _app.MaintainManualDrive(activeId, ManualDriveAction.TurnLeft);
+            else if (_isManualTurnRightActive) _app.MaintainManualDrive(activeId, ManualDriveAction.TurnRight);
 
             // 驱动仿真物理时钟步长推进
             if (_app.Engine != null && _app.Engine.IsRunning && !_app.Engine.IsPaused)
@@ -771,7 +696,8 @@ namespace WarehouseGridSimulation.Skia.Forms
                 ref _viewport.ViewportMinBtnRect,
                 ref _viewport.StatusMinBtnRect,
                 _renderFps,
-                interpolationAlpha);
+                interpolationAlpha,
+                _selectedRobotId);
         }
 
         // ==================== 鼠标事件转发与命中测试 ====================
@@ -825,15 +751,27 @@ namespace WarehouseGridSimulation.Skia.Forms
                 _skiaCanvas?.Invalidate();
             }
 
-            // 单机模式下单击未发生拖拽时进行目标网格拾取
-            if (isClick && _currentMode == SimulationMode.SingleRobot && _app.CurrentMap != null)
+            // 单击未发生拖拽时进行机器人点选接管或目标网格拾取
+            if (isClick && _app.CurrentMap != null)
             {
                 if (_viewport.ScreenToGrid(e.Location, _app.CurrentMap.Width, _app.CurrentMap.Height, out Point clickedPoint))
                 {
-                    if (!_app.CurrentMap.IsObstacle(new GridPoint(clickedPoint.X, clickedPoint.Y)))
+                    var clickedGrid = new GridPoint(clickedPoint.X, clickedPoint.Y);
+
+                    // 优先检查是否点选中了某台机器人的当前栅格
+                    var hitRobot = _app.Engine?.Robots?.FirstOrDefault(r => r.ConfirmedGrid == clickedGrid);
+                    if (hitRobot != null)
                     {
-                        _singleRobotPresenter?.OnGridClicked(clickedPoint);
+                        _selectedRobotId = hitRobot.Id;
                         _skiaCanvas?.Invalidate();
+                    }
+                    else if (_currentMode == SimulationMode.SingleRobot)
+                    {
+                        if (!_app.CurrentMap.IsObstacle(clickedGrid))
+                        {
+                            _singleRobotPresenter?.OnGridClicked(clickedPoint);
+                            _skiaCanvas?.Invalidate();
+                        }
                     }
                 }
             }
@@ -855,7 +793,6 @@ namespace WarehouseGridSimulation.Skia.Forms
             // 响应键盘按下事件并转换为手动控制长按状态。
             // e: 键盘事件参数。
             base.OnKeyDown(e);
-            if (_currentMode != SimulationMode.SingleRobot) return;
 
             switch (e.KeyCode)
             {
@@ -872,7 +809,10 @@ namespace WarehouseGridSimulation.Skia.Forms
                     SetManualTurnRight(true);
                     break;
                 case Keys.Space:
-                    HandleResetPosition();
+                    if (_currentMode == SimulationMode.SingleRobot)
+                    {
+                        HandleResetPosition();
+                    }
                     break;
             }
         }
@@ -881,7 +821,6 @@ namespace WarehouseGridSimulation.Skia.Forms
         {
             // 响应键盘松开事件并释放手动控制状态执行减速停止。
             base.OnKeyUp(e);
-            if (_currentMode != SimulationMode.SingleRobot) return;
 
             switch (e.KeyCode)
             {

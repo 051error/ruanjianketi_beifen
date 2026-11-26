@@ -5,6 +5,7 @@ using System.Drawing;
 using System.Windows.Forms;
 using WarehouseGridSimulation.Core.App;
 using WarehouseGridSimulation.Core.Geometry;
+using WarehouseGridSimulation.Core.Planning;
 using WarehouseGridSimulation.Core.Robots;
 
 namespace WarehouseGridSimulation.Skia.UI
@@ -38,6 +39,7 @@ namespace WarehouseGridSimulation.Skia.UI
             _multiTargets.Clear();
             IsMultiNavigating = false;
             _navStopwatch.Reset();
+            _app.Engine?.ResetCollisionStats();
         }
 
         public void GenerateRandomRobots(int count)
@@ -141,26 +143,57 @@ namespace WarehouseGridSimulation.Skia.UI
             return new Point(robot.ConfirmedGrid.X, robot.ConfirmedGrid.Y);
         }
 
-        public void HandleStartMultiNavigation(IWin32Window owner)
+        public void HandleStartMultiNavigation(IWin32Window owner, IMultiAgentPathPlanner planner = null, MultiAgentPlanOptions options = null)
         {
             // 启动多机协同调度导航任务。
-            // owner: 弹窗所属所有者窗口。
+            // owner: 弹窗所属所有者窗口; planner: 选用的多智能体路径规划器; options: 算法配置参数。
             if (_app.Engine.Robots.Count == 0 || _multiTargets.Count == 0)
             {
                 MessageBox.Show(owner, "请先生成机群与目标点！", "提示", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
 
+            var chosenPlanner = planner ?? _app.Engine.MultiAgentPathPlanner ?? MultiAgentPlannerRegistry.Default;
+            var opt = options ?? new MultiAgentPlanOptions();
+            var tasks = new List<AgentTask>();
             for (int i = 0; i < _app.Engine.Robots.Count && i < _multiTargets.Count; i++)
             {
                 var r = _app.Engine.Robots[i];
                 var t = _multiTargets[i];
-                var planResult = _app.Engine.PathPlanner.PlanPath(_app.CurrentMap, r.ConfirmedGrid, new GridPoint(t.X, t.Y));
-                if (planResult.Success)
+                tasks.Add(new AgentTask(r.Id, r.ConfirmedGrid, new GridPoint(t.X, t.Y)));
+            }
+
+            if (_lblMultiInfo != null)
+            {
+                _lblMultiInfo.Text = $"正在使用 {chosenPlanner.Name} 规划无冲突路径...";
+                _lblMultiInfo.ForeColor = Color.FromArgb(0, 100, 200);
+            }
+
+            var planResult = chosenPlanner.Plan(_app.CurrentMap, tasks, opt);
+            if (!planResult.Success || planResult.IsTimeout)
+            {
+                if (_lblMultiInfo != null)
                 {
-                    var mc = _app.Engine.GetMotionController(r.Id);
-                    mc?.SetPath(planResult.Path);
+                    _lblMultiInfo.Text = $"任务失败: {planResult.Message}";
+                    _lblMultiInfo.ForeColor = Color.FromArgb(220, 40, 40);
                 }
+                MessageBox.Show(
+                    owner,
+                    $"多机协同调度规划未成功！\n\n原因: {planResult.Message}\n求解耗时: {planResult.ElapsedMilliseconds} ms\n\n建议更换算法 (如 ECBS/WHCA*) 或重新随机生成机群分布。",
+                    "调度失败提示",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+                return;
+            }
+
+            // 规划成功，依次给各机器人装载正交无冲突时空路径
+            for (int i = 0; i < _app.Engine.Robots.Count && i < planResult.AgentPaths.Count; i++)
+            {
+                var r = _app.Engine.Robots[i];
+                var path = planResult.AgentPaths[i];
+                _app.Engine.ReservationManager.ReleaseRobotReservations(r.Id, r.ConfirmedGrid);
+                var mc = _app.Engine.GetMotionController(r.Id);
+                mc?.SetPath(path, initialAuthorizedIndex: 0);
             }
 
             IsMultiNavigating = true;
@@ -169,7 +202,7 @@ namespace WarehouseGridSimulation.Skia.UI
 
             if (_lblMultiInfo != null)
             {
-                _lblMultiInfo.Text = $"多机协同导航执行中 ({_app.Engine.Robots.Count}台)...";
+                _lblMultiInfo.Text = $"调度中: 采用 {chosenPlanner.Id} 协同行进 ({planResult.ElapsedMilliseconds}ms)";
                 _lblMultiInfo.ForeColor = Color.FromArgb(0, 110, 220);
             }
         }

@@ -16,8 +16,13 @@ namespace WarehouseGridSimulation.Core.Engine
         public bool AutoPauseOnCollision { get; set; } = true;
 
         /// <summary>
-        /// 机器人单段路径授权预看步数 (默认每次向前申请 1~2 步)。
+        /// 机器人单段路径授权前瞻步数 (基于动力学最大制动距离 2 格 + 2 格安全冗余，统一为 4 格移动闭塞区间)。
         /// </summary>
-        public int LookaheadAuthorizationSteps { get; set; } = 1;
+        public int LookaheadAuthorizationSteps { get; set; } = 4;
+
+        /// <summary>
+        /// 检测到循环等待死锁时是否自动触发在线协同重规划自适应脱困。
+        /// </summary>
+        public bool AutoReplanningOnDeadlock { get; set; } = true;
     }
 }

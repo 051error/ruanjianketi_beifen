@@ -154,6 +154,7 @@ namespace WarehouseGridSimulation.Core.Map
         /// </summary>
         public static (GridMap Map, MapData Data) CreateDefaultWarehouseMap()
         {
+            // 创建默认的标准仓储仿真地图并配置上货、双排卸货与等待区站点。
             int width = 30;
             int height = 30;
             float cellSize = 0.55f;
@@ -169,22 +170,38 @@ namespace WarehouseGridSimulation.Core.Map
                 InitialRobots = new List<RobotInitialDto>()
             };
 
-            // 站点配置 (作业点保留在 30x30 边界区域，便于发布搬运任务)：
-            // 上货点 (Pick)
-            data.Stations.Add(new StationDto { Id = 1, Name = "上货点-A", Type = "Pick", X = 2, Y = 2 });
-            data.Stations.Add(new StationDto { Id = 2, Name = "上货点-B", Type = "Pick", X = 15, Y = 2 });
-            data.Stations.Add(new StationDto { Id = 3, Name = "上货点-C", Type = "Pick", X = 27, Y = 2 });
+            // 1. 上货区配置：1x1 栅格，位于地图下方正中间 (X=15, Y=27)
+            data.Stations.Add(new StationDto { Id = 1, Name = "上货区", Type = "Pick", X = 15, Y = 27 });
 
-            // 卸货点 (Drop)
-            data.Stations.Add(new StationDto { Id = 4, Name = "卸货点-1", Type = "Drop", X = 2, Y = 27 });
-            data.Stations.Add(new StationDto { Id = 5, Name = "卸货点-2", Type = "Drop", X = 15, Y = 27 });
-            data.Stations.Add(new StationDto { Id = 6, Name = "卸货点-3", Type = "Drop", X = 27, Y = 27 });
+            // 2. 卸货区配置：两排 1x1 栅格，每排 3 个等距分布 (X=3, 15, 27)，中间间隔 3 行栅格 (第 1 排 Y=2，第 2 排 Y=6)
+            data.Stations.Add(new StationDto { Id = 2, Name = "卸货区-1", Type = "Drop", X = 3, Y = 2 });
+            data.Stations.Add(new StationDto { Id = 3, Name = "卸货区-2", Type = "Drop", X = 15, Y = 2 });
+            data.Stations.Add(new StationDto { Id = 4, Name = "卸货区-3", Type = "Drop", X = 27, Y = 2 });
+            data.Stations.Add(new StationDto { Id = 5, Name = "卸货区-4", Type = "Drop", X = 3, Y = 6 });
+            data.Stations.Add(new StationDto { Id = 6, Name = "卸货区-5", Type = "Drop", X = 15, Y = 6 });
+            data.Stations.Add(new StationDto { Id = 7, Name = "卸货区-6", Type = "Drop", X = 27, Y = 6 });
 
-            // 待命区 (Waiting) 位于中心
-            data.Stations.Add(new StationDto { Id = 7, Name = "待命区-中心", Type = "Waiting", X = 14, Y = 14 });
+            // 3. 等待区配置：大小为 2 行 10 列 (共 20 格)，位于上货区左侧 (X=5..14, Y=26..27)，上货区位于等待区右侧第一列第二行
+            int waitId = 10;
+            for (int r = 1; r <= 2; r++)
+            {
+                int y = 25 + r; // 第 1 行 Y=26，第 2 行 Y=27
+                for (int c = 1; c <= 10; c++)
+                {
+                    int x = 4 + c; // 第 1..10 列对应 X=5..14
+                    data.Stations.Add(new StationDto
+                    {
+                        Id = ++waitId,
+                        Name = $"等待位-{r}-{c}",
+                        Type = "Waiting",
+                        X = x,
+                        Y = y
+                    });
+                }
+            }
 
-            // 只设置单个机器人 (位于中心待命区 (14, 14)，初始朝向向上)
-            data.InitialRobots.Add(new RobotInitialDto { Id = 1, X = 14, Y = 14, Orientation = "Up" });
+            // 单机初始机器人配置于上货区 (15, 27)，朝向正上方直面卸货区
+            data.InitialRobots.Add(new RobotInitialDto { Id = 1, X = 15, Y = 27, Orientation = "Up" });
 
             string json = JsonSerializer.Serialize(data, JsonOptions);
             return LoadFromJson(json);
