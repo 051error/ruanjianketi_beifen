@@ -5,9 +5,6 @@ namespace WarehouseGridSimulation.Core.Robots
 {
     /// <summary>
     /// 仿真机器人 (AGV) 实体。
-    /// 严格遵循要求：
-    /// 1. 仅接收基础指令 (MoveForward, TurnLeft, TurnRight, Stop)。
-    /// 2. 具有真实连续动力学：加减速、原地转向、连续位移推进，禁止瞬移。
     /// </summary>
     public class SimulatedRobot
     {
@@ -151,9 +148,21 @@ namespace WarehouseGridSimulation.Core.Robots
                 // 2. 转向 (角度) 信号执行：转向与前进严格互斥，线速度强制为 0
                 LinearVelocity = 0f;
                 float turnDir = RemainingAngle > 0f ? 1f : -1f;
+                float curAbsOmega = Math.Abs(AngularVelocity);
 
-                AngularVelocity = turnDir * Math.Min(Config.TurnSpeed, Math.Abs(AngularVelocity) + Config.AngularAcceleration * dt);
-                float stepAngle = Math.Abs(AngularVelocity) * dt;
+                // 梯形角减速前瞻：计算以最大角减速度刹停所需的制动滑行角位移
+                float stoppingAngle = (curAbsOmega * curAbsOmega) / (2f * Config.AngularDeceleration);
+                if (Math.Abs(RemainingAngle) <= stoppingAngle && curAbsOmega > 0.3f)
+                {
+                    curAbsOmega = Math.Max(0.2f, curAbsOmega - Config.AngularDeceleration * dt);
+                }
+                else
+                {
+                    curAbsOmega = Math.Min(Config.TurnSpeed, curAbsOmega + Config.AngularAcceleration * dt);
+                }
+
+                AngularVelocity = turnDir * curAbsOmega;
+                float stepAngle = curAbsOmega * dt;
 
                 if (stepAngle >= Math.Abs(RemainingAngle))
                 {
@@ -176,11 +185,11 @@ namespace WarehouseGridSimulation.Core.Robots
                 LinearVelocity = Math.Max(0f, LinearVelocity - Config.LinearDeceleration * dt);
                 if (AngularVelocity > 0f)
                 {
-                    AngularVelocity = Math.Max(0f, AngularVelocity - Config.AngularAcceleration * dt);
+                    AngularVelocity = Math.Max(0f, AngularVelocity - Config.AngularDeceleration * dt);
                 }
                 else if (AngularVelocity < 0f)
                 {
-                    AngularVelocity = Math.Min(0f, AngularVelocity + Config.AngularAcceleration * dt);
+                    AngularVelocity = Math.Min(0f, AngularVelocity + Config.AngularDeceleration * dt);
                 }
 
                 if (LinearVelocity > 0f)
@@ -223,6 +232,35 @@ namespace WarehouseGridSimulation.Core.Robots
             // 精确对齐目标航向角并清除残留角速度。
             // targetHeading: 目标航向角弧度值。
             Position = new Pose2D(Position.X, Position.Y, targetHeading);
+            AngularVelocity = 0f;
+        }
+
+        public void ApplyLateralCorrection(float lateralDx, float lateralDy, float maxLimit)
+        {
+            // 沿航道法向施加闭环控制器计算的微量平滑纠偏位移。
+            // lateralDx: 横轴微量纠偏位移增量; lateralDy: 纵轴微量纠偏位移增量; maxLimit: 单步允许施加的最大纠偏位移绝对值上限。
+            float clampedDx = Math.Clamp(lateralDx, -maxLimit, maxLimit);
+            float clampedDy = Math.Clamp(lateralDy, -maxLimit, maxLimit);
+            Position = new Pose2D(Position.X + clampedDx, Position.Y + clampedDy, Position.Heading);
+        }
+
+        public void AlignToTrack(float? lockX, float? lockY, float standardHeading)
+        {
+            // 沿正交磁带航道纠偏对准中轴线并消除横向漂移。
+            // lockX: 垂直航道时锁定的标准横坐标; lockY: 水平航道时锁定的标准纵坐标; standardHeading: 当前航段的标准正交航向。
+            float newX = lockX.HasValue ? lockX.Value : Position.X;
+            float newY = lockY.HasValue ? lockY.Value : Position.Y;
+            Position = new Pose2D(newX, newY, standardHeading);
+        }
+
+        public void SnapToCenter(GridPoint grid, float cellSizeMeters, float targetHeading)
+        {
+            // 在到达转弯点或终点停稳时精准归心并对齐正交正向。
+            // grid: 目标对齐的栅格; cellSizeMeters: 单栅格尺寸; targetHeading: 目标航向。
+            float cx = (grid.X + 0.5f) * cellSizeMeters;
+            float cy = (grid.Y + 0.5f) * cellSizeMeters;
+            Position = new Pose2D(cx, cy, targetHeading);
+            ConfirmedGrid = grid;
             AngularVelocity = 0f;
         }
 

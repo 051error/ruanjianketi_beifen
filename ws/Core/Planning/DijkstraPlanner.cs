@@ -10,6 +10,12 @@ namespace WarehouseGridSimulation.Core.Planning
     /// </summary>
     public class DijkstraPlanner : AStarPlanner
     {
+        protected override float ComputeStepCost((GridPoint Pt, int Dir) current, int nextDir)
+        {
+            // Dijkstra 严格按拓扑跳数计算实际步长代价，不带任何转向惩罚。
+            return 1.0f;
+        }
+
         protected override float ComputeHeuristic(GridPoint current, GridPoint? moveDir, GridPoint goal)
         {
             // 计算 Dijkstra 启发式代价值 (恒为零，纯实际移动代价优先)。

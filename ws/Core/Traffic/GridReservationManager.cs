@@ -46,6 +46,52 @@ namespace WarehouseGridSimulation.Core.Traffic
             _waitTimes[robotId] = 0f;
         }
 
+        public void ReleaseRobotReservations(int robotId, GridPoint preserveGrid)
+        {
+            // 清理指定机器人在旧路径上持有的全部预约栅格与通行边，仅保留当前已占有的物理栅格。
+            // robotId: 目标机器人编号; preserveGrid: 机器人当前已确认占有的物理栅格。
+            var reservedKeysToRemove = new List<GridPoint>();
+            foreach (var kvp in _reservedGrids)
+            {
+                if (kvp.Value == robotId)
+                {
+                    reservedKeysToRemove.Add(kvp.Key);
+                }
+            }
+            foreach (var key in reservedKeysToRemove)
+            {
+                _reservedGrids.Remove(key);
+            }
+
+            var edgeKeysToRemove = new List<long>();
+            foreach (var kvp in _reservedEdges)
+            {
+                if (kvp.Value == robotId)
+                {
+                    edgeKeysToRemove.Add(kvp.Key);
+                }
+            }
+            foreach (var key in edgeKeysToRemove)
+            {
+                _reservedEdges.Remove(key);
+            }
+
+            var occupiedKeysToRemove = new List<GridPoint>();
+            foreach (var kvp in _occupiedGrids)
+            {
+                if (kvp.Value == robotId && kvp.Key != preserveGrid)
+                {
+                    occupiedKeysToRemove.Add(kvp.Key);
+                }
+            }
+            foreach (var key in occupiedKeysToRemove)
+            {
+                _occupiedGrids.Remove(key);
+            }
+
+            _occupiedGrids[preserveGrid] = robotId;
+        }
+
         public static long GetUndirectedEdgeKey(GridPoint u, GridPoint v)
         {
             int uCode = (u.X & 0xFFFF) | ((u.Y & 0xFFFF) << 16);
@@ -154,49 +200,145 @@ namespace WarehouseGridSimulation.Core.Traffic
         /// </summary>
         public void UpdateOccupancyAndRelease(
             int robotId,
-            GridPoint currentGrid,
+            GridPoint lastConfirmedGrid,
             GridPoint targetGrid,
-            Pose2D currentPosition,
-            float cellSizeMeters,
-            float collisionRadius)
+            GridPoint currentConfirmedGrid)
         {
-            // 如果已到达目标栅格中心附近
-            float targetCenterX = (targetGrid.X + 0.5f) * cellSizeMeters;
-            float targetCenterY = (targetGrid.Y + 0.5f) * cellSizeMeters;
-            float distToTargetCenter = currentPosition.DistanceTo(targetCenterX, targetCenterY);
-
-            // 当机器人靠近目标栅格 (距离中心小于半个栅格边长) 且实际中心在 targetGrid 内
-            int actualGridX = (int)Math.Floor(currentPosition.X / cellSizeMeters);
-            int actualGridY = (int)Math.Floor(currentPosition.Y / cellSizeMeters);
-
-            if (actualGridX == targetGrid.X && actualGridY == targetGrid.Y)
+            // 基于地标确认执行原子交接与双格安全锁释放。
+            // lastConfirmedGrid: 机器人上一个已确认离开的地标栅格; currentConfirmedGrid: 机器人当前传感器扫描确认的地标栅格。
+            if (currentConfirmedGrid != targetGrid)
             {
-                // 确认占有 targetGrid
-                _occupiedGrids[targetGrid] = robotId;
-                _reservedGrids.Remove(targetGrid);
+                // 未扫码确认对准目标地标，保持双格安全锁状态以防追尾
+                return;
+            }
 
-                // 检查是否已经完全离开 currentGrid
-                if (currentGrid != targetGrid)
+            // 机器人确认进入目标栅格地标：原子化确立占用
+            _occupiedGrids[targetGrid] = robotId;
+            _reservedGrids.Remove(targetGrid);
+
+            // 彻底释放上一地标与通道边占用
+            if (lastConfirmedGrid != targetGrid)
+            {
+                if (_occupiedGrids.TryGetValue(lastConfirmedGrid, out int occupant) && occupant == robotId)
                 {
-                    float oldCenterX = (currentGrid.X + 0.5f) * cellSizeMeters;
-                    float oldCenterY = (currentGrid.Y + 0.5f) * cellSizeMeters;
-                    float distToOldCenter = currentPosition.DistanceTo(oldCenterX, oldCenterY);
+                    _occupiedGrids.Remove(lastConfirmedGrid);
+                }
+                long edgeKey = GetUndirectedEdgeKey(lastConfirmedGrid, targetGrid);
+                if (_reservedEdges.TryGetValue(edgeKey, out int edgeOwner) && edgeOwner == robotId)
+                {
+                    _reservedEdges.Remove(edgeKey);
+                }
+            }
+        }
 
-                    // 机器人边缘离老中心距离 > (半格宽度 + 安全余量)，确保物理彻底退出
-                    if (distToOldCenter > cellSizeMeters * 0.7f)
+        public void SweepHistoricalReservations(int robotId, IReadOnlyList<GridPoint> path, GridPoint currentConfirmedGrid)
+        {
+            // 扫描并彻底释放机器人沿规划路径已经驶离且确认退出的所有历史栅格与通道边。
+            // path: 机器人当前遵循的规划路径; currentConfirmedGrid: 机器人当前最新扫码确认所处的物理栅格。
+            if (path == null || path.Count == 0) return;
+
+            int confirmedIndex = -1;
+            for (int i = 0; i < path.Count; i++)
+            {
+                if (path[i] == currentConfirmedGrid)
+                {
+                    confirmedIndex = i;
+                    break;
+                }
+            }
+
+            if (confirmedIndex <= 0) return;
+
+            for (int i = 0; i < confirmedIndex; i++)
+            {
+                var pastGrid = path[i];
+                if (pastGrid != currentConfirmedGrid)
+                {
+                    if (_occupiedGrids.TryGetValue(pastGrid, out int occupant) && occupant == robotId)
                     {
-                        if (_occupiedGrids.TryGetValue(currentGrid, out int occupant) && occupant == robotId)
-                        {
-                            _occupiedGrids.Remove(currentGrid);
-                        }
-                        long edgeKey = GetUndirectedEdgeKey(currentGrid, targetGrid);
-                        if (_reservedEdges.TryGetValue(edgeKey, out int edgeOwner) && edgeOwner == robotId)
-                        {
-                            _reservedEdges.Remove(edgeKey);
-                        }
+                        _occupiedGrids.Remove(pastGrid);
+                    }
+                    if (_reservedGrids.TryGetValue(pastGrid, out int reserver) && reserver == robotId)
+                    {
+                        _reservedGrids.Remove(pastGrid);
+                    }
+                }
+
+                if (i < path.Count - 1)
+                {
+                    var nextGrid = path[i + 1];
+                    long edgeKey = GetUndirectedEdgeKey(pastGrid, nextGrid);
+                    if (_reservedEdges.TryGetValue(edgeKey, out int edgeOwner) && edgeOwner == robotId)
+                    {
+                        _reservedEdges.Remove(edgeKey);
                     }
                 }
             }
+        }
+
+        public static List<GridPoint> GetOverlappingGrids(float x, float y, float radius, float cellSize)
+        {
+            // 计算指定世界坐标与包络半径在网格地图中发生几何交叠的全部栅格。
+            // x: 世界横坐标; y: 世界纵坐标; radius: 包络圆半径; cellSize: 单网格物理边长。
+            var result = new List<GridPoint>();
+            if (cellSize <= 0f) return result;
+
+            int minGx = (int)Math.Floor((x - radius) / cellSize);
+            int maxGx = (int)Math.Floor((x + radius) / cellSize);
+            int minGy = (int)Math.Floor((y - radius) / cellSize);
+            int maxGy = (int)Math.Floor((y + radius) / cellSize);
+
+            for (int gx = minGx; gx <= maxGx; gx++)
+            {
+                for (int gy = minGy; gy <= maxGy; gy++)
+                {
+                    float cellMinX = gx * cellSize;
+                    float cellMaxX = (gx + 1) * cellSize;
+                    float cellMinY = gy * cellSize;
+                    float cellMaxY = (gy + 1) * cellSize;
+
+                    float closestX = Math.Clamp(x, cellMinX, cellMaxX);
+                    float closestY = Math.Clamp(y, cellMinY, cellMaxY);
+
+                    float dx = x - closestX;
+                    float dy = y - closestY;
+                    if (dx * dx + dy * dy <= radius * radius)
+                    {
+                        result.Add(new GridPoint(gx, gy));
+                    }
+                }
+            }
+
+            return result;
+        }
+
+        public bool TryAcquireMultiGridOverlapLock(int robotId, IEnumerable<GridPoint> grids, out string failReason)
+        {
+            // 为偏位或处于田字格交界处的机器人原子化申请并锁定全部物理交叠栅格。
+            // failReason: 申请交叠锁定失败时的冲突原因描述。
+            failReason = null;
+            if (grids == null) return true;
+
+            foreach (var g in grids)
+            {
+                if (_occupiedGrids.TryGetValue(g, out int occupant) && occupant != robotId)
+                {
+                    failReason = $"交叠栅格 {g} 正被机器人 #{occupant} 占用";
+                    return false;
+                }
+                if (_reservedGrids.TryGetValue(g, out int reserver) && reserver != robotId)
+                {
+                    failReason = $"交叠栅格 {g} 已被机器人 #{reserver} 预约";
+                    return false;
+                }
+            }
+
+            foreach (var g in grids)
+            {
+                _occupiedGrids[g] = robotId;
+            }
+
+            return true;
         }
     }
 }

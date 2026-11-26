@@ -18,6 +18,7 @@ namespace WarehouseGridSimulation.Core.Engine
         public bool HasCargo { get; init; }
         public int? CurrentTaskId { get; init; }
         public IReadOnlyList<GridPoint> CurrentPath { get; init; }
+        public int CurrentTargetIndex { get; init; }
         public GridPoint? TargetGrid { get; init; }
         public bool IsAwaitingAuthorization { get; init; }
         public float WaitTimeSeconds { get; init; }

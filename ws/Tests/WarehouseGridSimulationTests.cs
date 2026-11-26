@@ -519,5 +519,514 @@ namespace WarehouseGridSimulation.Tests
 
             Assert.AreEqual(1, turns, "在开阔网格对角导航场景下，带转向成本启发式的 A* 应规划出仅有 1 次拐弯的最优路线");
         }
+
+        // 场景 15：无 UI 环境下通过 SimulationApp.NavigateRobot 调度单机导航与自动推进闭环
+        [TestMethod]
+        public void Scenario15_HeadlessNavigateRobotAndArrival()
+        {
+            // 验证核心层单机导航外观接口在无界面环境下的寻路、下发与步进完成闭环。
+            // app: 仿真应用外观实例; target: 导航目标网格; navResult: 导航启动结果对象; mc: 机器人关联运动控制器。
+            var app = new SimulationApp();
+            var target = new GridPoint(14, 12); // 朝向上方直行两格
+
+            var navResult = app.NavigateRobot(1, target);
+            Assert.IsTrue(navResult.Success, "无 UI 调度单机导航应成功规划并启动");
+            Assert.IsTrue(navResult.Path.Count > 1, "规划生成的路径应包含多个节点");
+            Assert.IsTrue(app.Engine.IsRunning, "下发导航路径后仿真引擎应自动处于运行状态");
+
+            var mc = app.Engine.GetMotionController(1);
+            Assert.IsNotNull(mc, "运动控制器应成功绑定");
+            Assert.IsTrue(mc.HasPath, "运动控制器应接收到规划路径");
+
+            // 后台驱动推进 40 步 (4 秒，足够直行加速、匀速巡航与梯形平稳减速停稳)
+            app.RunHeadless(40);
+
+            var r = app.Engine.GetRobot(1);
+            Assert.IsNotNull(r);
+            Assert.AreEqual(target, r.ConfirmedGrid, "机器人应在仿真步长推进后精确到达目标网格中心");
+            Assert.IsTrue(mc.IsPathCompleted, "到达目标后控制器路径完成标志应为 true");
+            Assert.IsTrue(r.LinearVelocity <= r.Config.SpeedTolerance, "到达后线速度应满足停靠容差");
+        }
+
+        // 场景 16：无 UI 环境下取消导航制动与非法目标边界防护
+        [TestMethod]
+        public void Scenario16_HeadlessCancelNavigationAndBoundaryGuards()
+        {
+            // 验证取消导航制动以及越界、障碍物与已在原地时的边界防御。
+            // outOfBoundsTarget: 越界目标网格; obstacleTarget: 障碍物目标网格; sameTarget: 原地目标网格; cancelOk: 取消导航执行是否成功。
+            var app = new SimulationApp();
+
+            // 1. 越界目标防护
+            var outOfBoundsTarget = new GridPoint(100, 100);
+            var result1 = app.NavigateRobot(1, outOfBoundsTarget);
+            Assert.IsFalse(result1.Success, "越界目标应被安全拒绝");
+            Assert.IsTrue(result1.Message.Contains("超出地图范围"));
+
+            // 2. 障碍物目标防护
+            var obstacleTarget = new GridPoint(14, 18);
+            app.CurrentMap.SetObstacle(obstacleTarget, true);
+            var result2 = app.NavigateRobot(1, obstacleTarget);
+            Assert.IsFalse(result2.Success, "位于障碍物内的目标应被安全拒绝");
+            Assert.IsTrue(result2.Message.Contains("障碍物"));
+
+            // 3. 当前已在目标点网格防护
+            var r = app.Engine.GetRobot(1);
+            var sameTarget = r.ConfirmedGrid;
+            var result3 = app.NavigateRobot(1, sameTarget);
+            Assert.IsFalse(result3.Success, "已在目标点时应提示已处于目标网格");
+            Assert.IsTrue(result3.Message.Contains("已处于目标点网格"));
+
+            // 4. 正常下发后中途取消导航并安全制动
+            var validTarget = new GridPoint(14, 20);
+            var result4 = app.NavigateRobot(1, validTarget);
+            Assert.IsTrue(result4.Success);
+
+            app.RunHeadless(5); // 移动若干步
+            var cancelOk = app.CancelNavigation(1);
+            Assert.IsTrue(cancelOk, "取消导航应执行成功");
+
+            var mc = app.Engine.GetMotionController(1);
+            Assert.IsTrue(!mc.HasPath || mc.IsPathCompleted, "取消后控制器路径应已被清空");
+        }
+
+        // 场景 17：大跨度开阔对角场景规划严格为单次拐弯的标准 L 型路径
+        [TestMethod]
+        public void Scenario17_LongDiagonalPathIsStrictLShaped()
+        {
+            // 验证带朝向状态与转向惩罚的 A* 在大跨度对角网格下规划出拐弯次数严格为 1 的标准 L 型路径。
+            // map: 30x30 开阔网格地图; planner: 待测 A* 规划器; start: 起点坐标; goal: 对角目标点坐标; turns: 实际统计转弯次数。
+            var map = new GridMap(30, 30, 0.55f);
+            var planner = new AStarPlanner();
+
+            var start = new GridPoint(2, 2);
+            var goal = new GridPoint(25, 20);
+            var result = planner.PlanPath(map, start, goal);
+
+            Assert.IsTrue(result.Success, "应成功找到对角路径");
+            Assert.AreEqual(start, result.Path[0]);
+            Assert.AreEqual(goal, result.Path[^1]);
+
+            int turns = 0;
+            for (int i = 1; i < result.Path.Count - 1; i++)
+            {
+                int dx1 = result.Path[i].X - result.Path[i - 1].X;
+                int dy1 = result.Path[i].Y - result.Path[i - 1].Y;
+                int dx2 = result.Path[i + 1].X - result.Path[i].X;
+                int dy2 = result.Path[i + 1].Y - result.Path[i].Y;
+                if (dx1 != dx2 || dy1 != dy2)
+                {
+                    turns++;
+                }
+            }
+
+            Assert.AreEqual(1, turns, "大跨度开阔对角路径转弯次数必须严格为 1 (标准 L 型，绝非多次折线的阶梯型)");
+        }
+
+        // 场景 18：验证 A* 与 Dijkstra 算法代价函数的明确区分
+        [TestMethod]
+        public void Scenario18_AStarAndDijkstraCostFunctionDistinction()
+        {
+            // 验证 A* 将转向纳入综合代价，而 Dijkstra 严格以网格跳数为步长代价。
+            // map: 30x30 开阔地图; astar: A* 规划器; dijkstra: Dijkstra 规划器; start: 规划起点; goal: 对角目标点。
+            var map = new GridMap(30, 30, 0.55f);
+            var astar = new AStarPlanner();
+            var dijkstra = new DijkstraPlanner();
+
+            var start = new GridPoint(1, 1);
+            var goal = new GridPoint(8, 8);
+
+            var astarResult = astar.PlanPath(map, start, goal);
+            var dijkstraResult = dijkstra.PlanPath(map, start, goal);
+
+            Assert.IsTrue(astarResult.Success);
+            Assert.IsTrue(dijkstraResult.Success);
+
+            // Dijkstra 的代价是纯距离步数 (14步)，无转向惩罚
+            Assert.AreEqual(14.0f, dijkstraResult.Cost, 1e-4f, "Dijkstra 代价函数应严格等于曼哈顿拓扑步数 14.0");
+
+            // A* 规划出标准 L 型路径，代价为 14步 + 1次转向 (0.7) = 14.7
+            Assert.AreEqual(14.7f, astarResult.Cost, 1e-4f, "A* 代价函数包含步长与转向惩罚");
+        }
+
+        // 场景 19：格间悬停维持双格锁与通道边防追尾
+        [TestMethod]
+        public void Scenario19_HoverBetweenGridsMaintainsDoubleLock()
+        {
+            // 验证机器人在两格之间行驶未扫到新地标时维持双格占用锁与通道边锁。
+            // manager: 待测交通预约管理器; startGrid: 初始所处栅格; nextGrid: 前往目标栅格; followerGrid: 后方拟驶入机器人所在栅格。
+            var manager = new GridReservationManager();
+            var startGrid = new GridPoint(2, 2);
+            var nextGrid = new GridPoint(3, 2);
+            var followerGrid = new GridPoint(1, 2);
+
+            manager.RegisterRobotInitialGrid(1, startGrid);
+            manager.RegisterRobotInitialGrid(2, followerGrid);
+
+            // 机器人 1 获得前往 nextGrid 的授权
+            bool r1Authorized = manager.TryAcquireStepAuthorization(1, startGrid, nextGrid, out _);
+            Assert.IsTrue(r1Authorized);
+
+            // 机器人 1 处于两格中间，读码仍为 startGrid (未扫到 nextGrid)
+            manager.UpdateOccupancyAndRelease(1, startGrid, nextGrid, startGrid);
+
+            // 验证 1：原栅格与目标栅格均处于保护锁定状态
+            Assert.IsTrue(manager.OccupiedGrids.ContainsKey(startGrid), "原栅格必须保持被机器人 1 占用");
+            Assert.IsTrue(manager.ReservedGrids.ContainsKey(nextGrid), "目标栅格必须保持被机器人 1 预约");
+
+            // 验证 2：后方机器人 2 尝试驶入原栅格 startGrid，必须被严正拒绝以防追尾
+            bool r2Allowed = manager.TryAcquireStepAuthorization(2, followerGrid, startGrid, out string rejectReason);
+            Assert.IsFalse(r2Allowed, "后方小车不得驶入前车尚未扫码交接的原栅格");
+            Assert.IsTrue(rejectReason.Contains("占用"));
+        }
+
+        // 场景 20：扫码进入新地标中心原子交接与原资源释放
+        [TestMethod]
+        public void Scenario20_LandmarkConfirmationAtomicHandoverAndRelease()
+        {
+            // 验证机器人中心传感器对齐新地标后原子化确立新占用并彻底释放原栅格和边。
+            var manager = new GridReservationManager();
+            var startGrid = new GridPoint(4, 4);
+            var nextGrid = new GridPoint(5, 4);
+
+            manager.RegisterRobotInitialGrid(1, startGrid);
+            manager.TryAcquireStepAuthorization(1, startGrid, nextGrid, out _);
+
+            // 扫码确认：机器人 ConfirmedGrid 变为 nextGrid
+            manager.UpdateOccupancyAndRelease(1, startGrid, nextGrid, nextGrid);
+
+            Assert.IsTrue(manager.OccupiedGrids.ContainsKey(nextGrid), "新地标必须成为正式物理占用");
+            Assert.IsFalse(manager.OccupiedGrids.ContainsKey(startGrid), "原栅格必须已被安全释放");
+            Assert.IsFalse(manager.ReservedGrids.ContainsKey(nextGrid), "预约池中已无该目标");
+
+            long edgeKey = GridReservationManager.GetUndirectedEdgeKey(startGrid, nextGrid);
+            Assert.IsFalse(manager.ReservedEdges.ContainsKey(edgeKey), "通道无向边已被彻底释放");
+        }
+
+        // 场景 21：重新设置目标点后旧目标点与未走路径资源被彻底释放
+        [TestMethod]
+        public void Scenario21_RetargetReleasesOldTargetAndResidualReservations()
+        {
+            // 验证单机模式在重设导航目标时旧目标栅格与旧路径所有未通行预约资源被彻底清除释放。
+            // app: 仿真外观门面实例; oldTarget: 原先设定的旧目标网格; newTarget: 重新设定的新目标网格。
+            var app = new SimulationApp();
+            var oldTarget = new GridPoint(14, 5);
+            var newTarget = new GridPoint(14, 25);
+
+            // 1. 下发旧导航目标 (14, 5)
+            var res1 = app.NavigateRobot(1, oldTarget);
+            Assert.IsTrue(res1.Success);
+            Assert.IsTrue(app.Engine.ReservationManager.ReservedGrids.ContainsKey(oldTarget), "旧目标点必须已被预约");
+
+            // 2. 在移动前或移动途中重新设定新目标 (14, 25)
+            var res2 = app.NavigateRobot(1, newTarget);
+            Assert.IsTrue(res2.Success);
+
+            // 3. 验证旧目标点及其路径上的预约资源已被彻底移除
+            Assert.IsFalse(app.Engine.ReservationManager.ReservedGrids.ContainsKey(oldTarget), "重设目标后旧目标点预约必须已被彻底释放");
+            Assert.IsTrue(app.Engine.ReservationManager.ReservedGrids.ContainsKey(newTarget), "新目标点已被正确预约");
+        }
+
+        // 场景 22：长直道全速巡航停稳与终点严格正交航向对齐
+        [TestMethod]
+        public void Scenario22_StraightCruiseAndFinalOrthogonalHeadingAlignment()
+        {
+            // 验证机器人沿长直道连续平滑巡航到站，停稳后朝向精确对齐正交四方向之一。
+            // robot: 目标机器人实体; mc: 运动控制器实例; headingDiff: 最终航向与正向角度偏差。
+            var app = new SimulationApp();
+            var target = new GridPoint(14, 8); // 向正上方延伸 6 个栅格的长直道
+
+            var res = app.NavigateRobot(1, target);
+            Assert.IsTrue(res.Success);
+
+            // 仿真推进足够步数以平稳巡航到站
+            app.RunHeadless(60);
+
+            var robot = app.Engine.GetRobot(1);
+            var mc = app.Engine.GetMotionController(1);
+
+            Assert.IsTrue(mc.IsPathCompleted, "长直道巡航应平滑完成到达");
+            Assert.AreEqual(target, robot.ConfirmedGrid, "机器人应精确停靠在目标栅格中央");
+            Assert.IsTrue(robot.LinearVelocity <= robot.Config.SpeedTolerance, "停靠后线速度应完全降为 0");
+
+            // 验证最终朝向：向上行驶对应 -PI/2 (-1.5708 rad)
+            float expectedHeading = -(float)Math.PI * 0.5f;
+            float headingDiff = Math.Abs(Pose2D.AngleDifference(expectedHeading, robot.Position.Heading));
+            Assert.IsTrue(headingDiff < 0.05f, $"到达终点后朝向必须严格对齐正交正向 (向上 -90°)，当前偏角: {robot.Position.Heading * 180f / Math.PI:F1}°");
+        }
+
+        // 场景 23：转角栅格在机器人通过后被彻底安全释放 (杜绝橙色高亮残留)
+        [TestMethod]
+        public void Scenario23_CornerGridOccupancyIsSweptAfterPassing()
+        {
+            // 验证机器人走过 L 型折线路径后拐弯转角栅格的物理占用被彻底释放。
+            // cornerTarget: 经过单次折线拐角的目标终点网格; cornerGrid: 路径中实际发生转向的拐角栅格。
+            var app = new SimulationApp();
+            // 起点 (14, 14)，拐角 (14, 10)，终点 (18, 10)
+            var cornerTarget = new GridPoint(18, 10);
+            var cornerGrid = new GridPoint(14, 10);
+
+            var res = app.NavigateRobot(1, cornerTarget);
+            Assert.IsTrue(res.Success);
+
+            // 驱动仿真直到完全到达终点 (18, 10)
+            app.RunHeadless(80);
+
+            var robot = app.Engine.GetRobot(1);
+            Assert.AreEqual(cornerTarget, robot.ConfirmedGrid, "机器人应到达最终目标");
+
+            // 核心断言：拐角栅格 (14, 10) 绝不能残留在 OccupiedGrids 占用池中 (杜绝橙色高亮残留)
+            Assert.IsFalse(app.Engine.ReservationManager.OccupiedGrids.ContainsKey(cornerGrid), "拐角栅格在机器人驶离后必须已被彻底释放，禁止残留橙色占用");
+
+            // 并且只有终点网格保留占用
+            Assert.IsTrue(app.Engine.ReservationManager.OccupiedGrids.ContainsKey(cornerTarget), "当前应仅由终点栅格确立占用");
+        }
+
+        // 场景 24：机器人行驶过程中严格贴合航道正中轴线且通过栅格物理中心
+        [TestMethod]
+        public void Scenario24_MovementStrictlyPassesThroughGridCentersAndMatchesTrack()
+        {
+            // 验证机器人在沿航段移动时横向偏离中心线误差严格受控于一毫米之内。
+            // cellSize: 地图单网格物理尺寸; target: 导航目标网格; maxCrossTrackError: 行驶过程中的最大横向轨迹偏差。
+            var app = new SimulationApp();
+            float cellSize = app.CurrentMap.CellSizeMeters;
+            var target = new GridPoint(14, 9); // 向正上方移动 5 个网格
+
+            app.NavigateRobot(1, target);
+
+            float maxCrossTrackError = 0f;
+            float expectedCenterX = (14 + 0.5f) * cellSize; // 垂直航道 X 坐标应严格对齐第 14 列中心
+
+            for (int i = 0; i < 40; i++)
+            {
+                app.Engine.Step();
+                var r = app.Engine.GetRobot(1);
+                if (r.LinearVelocity > 0.1f)
+                {
+                    float crossError = Math.Abs(r.Position.X - expectedCenterX);
+                    if (crossError > maxCrossTrackError)
+                    {
+                        maxCrossTrackError = crossError;
+                    }
+                }
+            }
+
+            Assert.IsTrue(maxCrossTrackError < 1e-4f, $"小车在行驶过程中横向轨迹最大偏差为 {maxCrossTrackError:F5}m，必须严格对齐蓝色规划中心线");
+        }
+
+        // 场景 25：机器人原地转向遵循梯形角加减速平滑曲线且不发生角速度瞬态归零
+        [TestMethod]
+        public void Scenario25_RobotRotationFollowsTrapezoidalDecelerationProfile()
+        {
+            // 验证机器人在原地转向时角速度按角加速度平滑加速并按角减速度梯形减速到位。
+            // robot: 测试机器人实体; dt: 仿真单步微元时间; maxObservedOmega: 转向过程中观测到的最大角速度峰值; lastOmegaBeforeStop: 停稳到位前最后一个步长记录的角速度; targetAngle: 原地目标旋转弧度; sawDeceleration: 减速过程观察标志。
+            var robot = new SimulatedRobot(1, new GridPoint(5, 5), 0f, 0.55f);
+            float targetAngle = (float)Math.PI * 0.5f; // 原地旋转 90 度
+            robot.ExecuteCommand(RobotCommand.Rotate(targetAngle));
+
+            float dt = 0.05f;
+            float maxObservedOmega = 0f;
+            float lastOmegaBeforeStop = 0f;
+            bool sawDeceleration = false;
+
+            for (int i = 0; i < 50 && robot.RemainingAngle > 0f; i++)
+            {
+                float prevOmega = Math.Abs(robot.AngularVelocity);
+                robot.Step(dt, 0.55f);
+                float curOmega = Math.Abs(robot.AngularVelocity);
+
+                if (curOmega > maxObservedOmega)
+                {
+                    maxObservedOmega = curOmega;
+                }
+
+                if (prevOmega > 0.5f && curOmega < prevOmega && robot.RemainingAngle > 0f)
+                {
+                    sawDeceleration = true;
+                }
+
+                if (robot.RemainingAngle > 0f)
+                {
+                    lastOmegaBeforeStop = curOmega;
+                }
+            }
+
+            Assert.IsTrue(maxObservedOmega > 0.5f, "转向过程中应加速至有效角速度");
+            Assert.IsTrue(sawDeceleration, "转向到位前必须观测到按角减速度逐步减速的平滑制动过程");
+            Assert.IsTrue(lastOmegaBeforeStop < maxObservedOmega, "到位前最后一个步长的角速度应显著低于峰值角速度，杜绝高速瞬间归零");
+            Assert.AreEqual(0f, robot.RemainingAngle, 1e-4f, "目标旋转角度应精确完成");
+        }
+
+        // 场景 26：PID 闭环控制到站对准且无任何坐标瞬移
+        [TestMethod]
+        public void Scenario26_PidClosedLoopArrivalWithoutCoordinateTeleport()
+        {
+            // 验证机器人在运动控制器闭环 PID 驱动下平滑到站，全程单步位移严格受限于动力学速度且无坐标跳变。
+            // app: 仿真外观门面实例; target: 导航目标网格; prevPos: 前一仿真步长的世界坐标; maxStepJump: 记录的最大单步位移跳变距离; r: 目标机器人实体; distToCenter: 最终距离栅格中心的实际物理残差。
+            var app = new SimulationApp();
+            var target = new GridPoint(14, 11); // 直行 3 格
+
+            var navRes = app.NavigateRobot(1, target);
+            Assert.IsTrue(navRes.Success);
+
+            var r = app.Engine.GetRobot(1);
+            var prevPos = r.Position;
+            float maxStepJump = 0f;
+
+            for (int i = 0; i < 50; i++)
+            {
+                app.Engine.Step();
+                float stepDist = r.Position.DistanceTo(prevPos.X, prevPos.Y);
+                if (stepDist > maxStepJump)
+                {
+                    maxStepJump = stepDist;
+                }
+                prevPos = r.Position;
+            }
+
+            var mc = app.Engine.GetMotionController(1);
+            Assert.IsTrue(mc.IsPathCompleted, "小车应通过 PID 闭环平滑停稳到站");
+            Assert.AreEqual(target, r.ConfirmedGrid, "地标中心应成功确认目标栅格");
+
+            // 单步最大位移不应超过物理极值 (MaxSpeed * dt = 1.5 * 0.1 = 0.15m)，杜绝瞬移
+            Assert.IsTrue(maxStepJump <= 0.16f, $"最大单步位移为 {maxStepJump:F3}m，严禁出现瞬移坐标跳变");
+
+            // 最终物理中心偏差严格收敛在毫米级以内
+            float targetPhysX = (target.X + 0.5f) * app.CurrentMap.CellSizeMeters;
+            float targetPhysY = (target.Y + 0.5f) * app.CurrentMap.CellSizeMeters;
+            float distToCenter = r.Position.DistanceTo(targetPhysX, targetPhysY);
+            Assert.IsTrue(distToCenter <= 0.02f, $"最终停靠中心偏差为 {distToCenter:F4}m，应精准收敛在 2cm 以内");
+        }
+
+        // 场景 27：直段巡航至拐点减速平滑连续，杜绝中途误判急刹停顿与二次起步
+        [TestMethod]
+        public void Scenario27_StraightCruiseToCornerDeceleratesSmoothlyWithoutMidwayStopStall()
+        {
+            // 验证小车在直段高速巡航驶向转弯拐角时梯形连续减速，中途不发生速度断崖归零或状态提前变为停顿。
+            // app: 仿真外观门面实例; cornerTarget: 经过单次折线拐角的目标终点网格; cornerGrid: 路径中实际发生转向的拐角栅格; r: 目标机器人实体; cornerPhysY: 拐角网格世界几何中心纵坐标; midwayStallDetected: 是否在中途检测到异常停顿标志。
+            var app = new SimulationApp();
+            var cornerTarget = new GridPoint(18, 10);
+            var cornerGrid = new GridPoint(14, 10);
+
+            var navRes = app.NavigateRobot(1, cornerTarget);
+            Assert.IsTrue(navRes.Success);
+
+            var r = app.Engine.GetRobot(1);
+            float cellSize = app.CurrentMap.CellSizeMeters;
+            float cornerPhysY = (cornerGrid.Y + 0.5f) * cellSize;
+            bool midwayStallDetected = false;
+
+            // 监测到达拐角之前的减速过程
+            for (int i = 0; i < 40; i++)
+            {
+                app.Engine.Step();
+                float distToCorner = Math.Abs(r.Position.Y - cornerPhysY);
+
+                // 在距离拐角中心大于 0.05m 的中途路段
+                if (distToCorner > 0.05f && distToCorner < 1.0f)
+                {
+                    // 若中途线速度小于 0.01m/s 或状态变为 Stopped，说明发生中途急刹顿挫
+                    if (r.LinearVelocity < 0.01f && r.MotionState == RobotMotionState.Stopped)
+                    {
+                        midwayStallDetected = true;
+                        break;
+                    }
+                }
+
+                // 一旦拐弯完成开始横向行驶则退出前段监测
+                if (r.Position.X > (14 + 0.6f) * cellSize)
+                {
+                    break;
+                }
+            }
+
+            Assert.IsFalse(midwayStallDetected, "小车在驶向转弯拐角的过程中必须平滑减速，严禁在中途急刹停顿并二次起步");
+        }
+
+        // 场景 28：机器人在田字格十字交界非中心偏位状态下启动导航并安全归正到站
+        [TestMethod]
+        public void Scenario28_OffCenterRobotInIntersectionNavigatesSafelyToGoal()
+        {
+            // 验证机器人在四个栅格交界的十字路口偏位处启动导航，安全层加锁交叠栅格并平滑归正最终到达目标。
+            // map: 仓储网格地图; engine: 仿真引擎实例; cellSize: 单网格物理边长; offCenterX: 田字格十字交汇世界横坐标; offCenterY: 田字格十字交汇世界纵坐标; robot: 初始置于十字交界处的仿真机器人实体; target: 导航目标网格; navRes: 导航调用返回结果; mc: 运动控制器实例; targetPhysX: 目标网格世界几何中心横坐标; targetPhysY: 目标网格世界几何中心纵坐标; distToGoal: 到达目标中心残差距离。
+            var map = new GridMap(20, 20, 0.55f);
+            var engine = new SimulationEngine(map, new SimulationConfig { FixedDeltaTime = 0.1f });
+            float cellSize = 0.55f;
+
+            // 将机器人精确放置在四个网格 (10,10), (11,10), (10,11), (11,11) 的十字交叉中心点
+            float offCenterX = 11f * cellSize;
+            float offCenterY = 11f * cellSize;
+            var robot = new SimulatedRobot(1, offCenterX, offCenterY, 0f, cellSize);
+            engine.AddRobot(robot);
+
+            // 导航目标为右侧 (15, 10)
+            var target = new GridPoint(15, 10);
+            var navRes = engine.NavigateRobot(1, target);
+
+            Assert.IsTrue(navRes.Success, "处于田字格交汇非中心偏位状态下的机器人应成功启动导航");
+
+            // 验证交叠包络安全锁：田字格关键栅格已被安全纳入占用管理
+            var manager = engine.ReservationManager;
+            Assert.IsTrue(manager.OccupiedGrids.ContainsKey(new GridPoint(11, 10)) ||
+                          manager.OccupiedGrids.ContainsKey(new GridPoint(10, 10)),
+                          "安全层必须原子化锁定与车体交叠的田字格网格");
+
+            var mc = engine.GetMotionController(1);
+
+            // 仿真推进 100 步，驱动机器人就近归正并完成全程巡航
+            for (int i = 0; i < 100; i++)
+            {
+                engine.Step();
+            }
+
+            Assert.IsTrue(mc.IsPathCompleted, "机器人应顺利完成就近归正与全程导航到达");
+            Assert.AreEqual(target, robot.ConfirmedGrid, "地标感应器最终应精准对准目标栅格");
+
+            float targetPhysX = (target.X + 0.5f) * cellSize;
+            float targetPhysY = (target.Y + 0.5f) * cellSize;
+            float distToGoal = robot.Position.DistanceTo(targetPhysX, targetPhysY);
+            Assert.IsTrue(distToGoal <= 0.02f, $"最终停靠位置与目标中心偏差为 {distToGoal:F4}m，应小于 2cm");
+        }
+
+        // 场景 29：横向中心线循迹 PID 控制器在直角转弯后动态消除横向偏差并精准贴合航道
+        [TestMethod]
+        public void Scenario29_LateralCrossTrackPidDynamicallyEliminatesTrackingOffset()
+        {
+            // 验证机器人在完成拐弯转向切入新航道后横向循迹闭环控制器持续纠偏，确保行驶轨迹严格对准栅格中心线。
+            // app: 仿真外观门面实例; cornerTarget: 包含直角拐弯的目标网格; navRes: 导航调用返回结果; r: 目标机器人实体; cellSize: 单网格物理边长; expectedY: 拐弯后水平航道标准中心纵坐标; maxHorizontalCrossTrackError: 水平巡航阶段记录的最大横向距离残差; mc: 运动控制器实例。
+            var app = new SimulationApp();
+            var cornerTarget = new GridPoint(18, 10);
+
+            var navRes = app.NavigateRobot(1, cornerTarget);
+            Assert.IsTrue(navRes.Success);
+
+            var r = app.Engine.GetRobot(1);
+            float cellSize = app.CurrentMap.CellSizeMeters;
+            float expectedY = (10 + 0.5f) * cellSize; // 拐角后水平段 Y 应为 5.775m
+            float maxHorizontalCrossTrackError = 0f;
+
+            // 推进仿真直到到达终点
+            for (int i = 0; i < 90; i++)
+            {
+                app.Engine.Step();
+
+                // 当小车已拐过弯并进入水平直道巡航 (X 越过 15 列)
+                if (r.Position.X > (15 + 0.5f) * cellSize && r.LinearVelocity > 0.1f)
+                {
+                    float lateralError = Math.Abs(r.Position.Y - expectedY);
+                    if (lateralError > maxHorizontalCrossTrackError)
+                    {
+                        maxHorizontalCrossTrackError = lateralError;
+                    }
+                }
+            }
+
+            var mc = app.Engine.GetMotionController(1);
+            Assert.IsTrue(mc.IsPathCompleted, "折线导航应顺利完成到达");
+            Assert.AreEqual(cornerTarget, r.ConfirmedGrid, "最终地标应精准匹配目标点");
+
+            // 验证在水平航道巡航期间的横向误差被 PID 牢牢控制在 1 毫米以内
+            Assert.IsTrue(maxHorizontalCrossTrackError < 0.001f,
+                $"水平航道巡航最大横向偏差为 {maxHorizontalCrossTrackError:F5}m，应通过横向 PID 严格收敛至 1mm 以内");
+        }
     }
 }

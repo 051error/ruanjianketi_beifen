@@ -181,7 +181,7 @@ namespace WarehouseGridSimulation.Skia.Rendering
 
         private void DrawReservations(SKCanvas canvas, SimulationSnapshot snapshot, float ox, float oy, float cellPixels)
         {
-            // 绘制受控区域中已被物理占用或被预约锁定的栅格高亮。
+            // 绘制受控区域中已被物理占用的栅格高亮。
             if (snapshot == null) return;
 
             if (snapshot.OccupiedGrids != null)
@@ -197,26 +197,6 @@ namespace WarehouseGridSimulation.Skia.Rendering
                         float x = ox + kvp.Key.X * cellPixels;
                         float y = oy + kvp.Key.Y * cellPixels;
                         canvas.DrawRect(x, y, cellPixels, cellPixels, occPaint);
-                    }
-                }
-            }
-
-            if (snapshot.ReservedGrids != null)
-            {
-                using (var resPaint = new SKPaint
-                {
-                    Color = new SKColor(30, 144, 255, 180),
-                    Style = SKPaintStyle.Stroke,
-                    StrokeWidth = 1.5f,
-                    PathEffect = SKPathEffect.CreateDash(new[] { 4f, 3f }, 0),
-                    IsAntialias = true
-                })
-                {
-                    foreach (var kvp in snapshot.ReservedGrids)
-                    {
-                        float x = ox + kvp.Key.X * cellPixels + 2;
-                        float y = oy + kvp.Key.Y * cellPixels + 2;
-                        canvas.DrawRect(x, y, cellPixels - 4, cellPixels - 4, resPaint);
                     }
                 }
             }
@@ -385,13 +365,16 @@ namespace WarehouseGridSimulation.Skia.Rendering
 
         private void DrawPlannedPaths(SKCanvas canvas, SimulationSnapshot snapshot, GridMap map, float ox, float oy, float cellPixels, float interpolationAlpha)
         {
-            // 绘制机群各机器人的规划路径折线。
+            // 绘制机群各机器人的未来规划路径折线 (不绘制已走过的历史路段与向后倒拉线)。
             if (snapshot?.Robots == null) return;
 
             for (int i = 0; i < snapshot.Robots.Count; i++)
             {
                 var r = snapshot.Robots[i];
                 if (r.CurrentPath == null || r.CurrentPath.Count <= 1) continue;
+
+                int targetIdx = Math.Clamp(r.CurrentTargetIndex, 0, r.CurrentPath.Count);
+                if (targetIdx >= r.CurrentPath.Count) continue; // 全部路径已走完
 
                 SKColor color = RobotColors[i % RobotColors.Length];
                 var position = Pose2D.Lerp(r.PreviousPosition, r.Position, interpolationAlpha);
@@ -402,8 +385,9 @@ namespace WarehouseGridSimulation.Skia.Rendering
                     float startY = oy + (position.Y / map.CellSizeMeters) * cellPixels;
                     pathLine.MoveTo(startX, startY);
 
-                    foreach (var pt in r.CurrentPath)
+                    for (int p = targetIdx; p < r.CurrentPath.Count; p++)
                     {
+                        var pt = r.CurrentPath[p];
                         float px = ox + (pt.X + 0.5f) * cellPixels;
                         float py = oy + (pt.Y + 0.5f) * cellPixels;
                         pathLine.LineTo(px, py);

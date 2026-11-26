@@ -48,28 +48,26 @@ namespace WarehouseGridSimulation.Core.Planning
                 return PathPlanResult.Ok(new List<GridPoint> { start }, 0f);
             }
 
-            var openSet = new PriorityQueue<GridPoint, float>();
-            var cameFrom = new Dictionary<GridPoint, GridPoint>();
-            var costSoFar = new Dictionary<GridPoint, float>();
-            var closedSet = new HashSet<GridPoint>();
+            var openSet = new PriorityQueue<(GridPoint Pt, int Dir), float>();
+            var cameFrom = new Dictionary<(GridPoint Pt, int Dir), (GridPoint Pt, int Dir)>();
+            var costSoFar = new Dictionary<(GridPoint Pt, int Dir), float>();
+            var closedSet = new HashSet<(GridPoint Pt, int Dir)>();
 
-            costSoFar[start] = 0f;
+            var startState = (Pt: start, Dir: -1);
+            costSoFar[startState] = 0f;
             float initialH = ComputeHeuristic(start, null, goal);
-            openSet.Enqueue(start, initialH);
+            openSet.Enqueue(startState, initialH);
+
+            (GridPoint Pt, int Dir)? goalState = null;
 
             while (openSet.Count > 0)
             {
-                GridPoint current = openSet.Dequeue();
+                var current = openSet.Dequeue();
 
-                if (current == goal)
+                if (current.Pt == goal)
                 {
-                    var reconstructed = ReconstructPath(cameFrom, current);
-                    // 校验规划结果
-                    if (ValidatePath(map, reconstructed, out string validationError))
-                    {
-                        return PathPlanResult.Ok(reconstructed, costSoFar[current]);
-                    }
-                    return PathPlanResult.Fail($"路径校验不通过: {validationError}");
+                    goalState = current;
+                    break;
                 }
 
                 if (!closedSet.Add(current))
@@ -77,9 +75,10 @@ namespace WarehouseGridSimulation.Core.Planning
 
                 float currentG = costSoFar[current];
 
-                foreach (var dir in Directions)
+                for (int d = 0; d < Directions.Length; d++)
                 {
-                    GridPoint neighbor = current + dir;
+                    GridPoint dir = Directions[d];
+                    GridPoint neighbor = current.Pt + dir;
 
                     if (!map.IsInside(neighbor) || map.IsObstacle(neighbor))
                         continue;
@@ -88,35 +87,61 @@ namespace WarehouseGridSimulation.Core.Planning
                     if (isDynamicBlocked != null && neighbor != goal && isDynamicBlocked(neighbor))
                         continue;
 
-                    if (closedSet.Contains(neighbor))
+                    var nextState = (Pt: neighbor, Dir: d);
+                    if (closedSet.Contains(nextState))
                         continue;
 
-                    float stepCost = 1.0f;
+                    float stepCost = ComputeStepCost(current, d);
                     float newG = currentG + stepCost;
 
-                    if (!costSoFar.TryGetValue(neighbor, out float bestG) || newG < bestG)
+                    if (!costSoFar.TryGetValue(nextState, out float bestG) || newG < bestG)
                     {
-                        costSoFar[neighbor] = newG;
-                        cameFrom[neighbor] = current;
+                        costSoFar[nextState] = newG;
+                        cameFrom[nextState] = current;
                         float h = ComputeHeuristic(neighbor, dir, goal);
-                        openSet.Enqueue(neighbor, newG + h);
+                        openSet.Enqueue(nextState, newG + h);
                     }
                 }
+            }
+
+            if (goalState.HasValue)
+            {
+                var reconstructed = ReconstructPath(cameFrom, goalState.Value);
+                if (ValidatePath(map, reconstructed, out string validationError))
+                {
+                    return PathPlanResult.Ok(reconstructed, costSoFar[goalState.Value]);
+                }
+                return PathPlanResult.Fail($"路径校验不通过: {validationError}");
             }
 
             return PathPlanResult.Fail($"未找到从 {start} 到 {goal} 的可行路径 (目标不可达)");
         }
 
-        private static List<GridPoint> ReconstructPath(Dictionary<GridPoint, GridPoint> cameFrom, GridPoint current)
+        private static List<GridPoint> ReconstructPath(
+            Dictionary<(GridPoint Pt, int Dir), (GridPoint Pt, int Dir)> cameFrom,
+            (GridPoint Pt, int Dir) current)
         {
-            var path = new List<GridPoint> { current };
-            while (cameFrom.TryGetValue(current, out GridPoint parent))
+            var path = new List<GridPoint> { current.Pt };
+            while (cameFrom.TryGetValue(current, out var parent))
             {
-                path.Add(parent);
+                if (parent.Dir == -1) // 到达起点
+                {
+                    path.Add(parent.Pt);
+                    break;
+                }
+                path.Add(parent.Pt);
                 current = parent;
             }
             path.Reverse();
             return path;
+        }
+
+        protected virtual float ComputeStepCost((GridPoint Pt, int Dir) current, int nextDir)
+        {
+            // 计算单步移动的实际代价，A* 将转向动作纳入累积代价惩罚。
+            // current: 当前节点状态; nextDir: 下一步移动方向索引。
+            float turnCost = (current.Dir >= 0 && current.Dir != nextDir) ? 0.7f : 0f;
+            return 1.0f + turnCost;
         }
 
         protected virtual float ComputeHeuristic(GridPoint current, GridPoint? moveDir, GridPoint goal)

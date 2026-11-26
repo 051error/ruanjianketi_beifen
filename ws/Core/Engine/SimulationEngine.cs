@@ -94,6 +94,147 @@ namespace WarehouseGridSimulation.Core.Engine
             return mc;
         }
 
+        public SimulatedRobot GetRobot(int robotId)
+        {
+            // 获取指定机器人实体对象。
+            return _robots.FirstOrDefault(r => r.Id == robotId);
+        }
+
+        public NavigationResult NavigateRobot(int robotId, GridPoint target, IPathPlanner customPlanner = null)
+        {
+            // 为指定机器人规划并下发导航路径并自动启动仿真推进。
+            // target: 导航目标网格坐标; customPlanner: 可选的定制路径规划器。
+            lock (_stateLock)
+            {
+                if (Map == null)
+                {
+                    return NavigationResult.Fail("地图未初始化");
+                }
+                if (!Map.IsInside(target))
+                {
+                    return NavigationResult.Fail($"目标点 [{target.X}, {target.Y}] 超出地图范围");
+                }
+                if (Map.IsObstacle(target))
+                {
+                    return NavigationResult.Fail($"目标点 [{target.X}, {target.Y}] 位于障碍物内");
+                }
+
+                var robot = GetRobot(robotId);
+                if (robot == null)
+                {
+                    return NavigationResult.Fail($"未找到编号为 #{robotId} 的机器人");
+                }
+
+                if (!_motionControllers.TryGetValue(robotId, out var controller))
+                {
+                    return NavigationResult.Fail($"未找到机器人 #{robotId} 的运动控制器");
+                }
+
+                float cellSize = Map.CellSizeMeters;
+                float confirmedCenterX = (robot.ConfirmedGrid.X + 0.5f) * cellSize;
+                float confirmedCenterY = (robot.ConfirmedGrid.Y + 0.5f) * cellSize;
+                float offsetFromConfirmed = robot.Position.DistanceTo(confirmedCenterX, confirmedCenterY);
+
+                bool isOffCenter = offsetFromConfirmed > robot.Config.PositionTolerance;
+                GridPoint startGrid = robot.ConfirmedGrid;
+
+                if (isOffCenter)
+                {
+                    // 机器人处于非中心偏位或田字格交汇处：启动方案一安全交叠加锁与就近归正
+                    var overlappingGrids = GridReservationManager.GetOverlappingGrids(
+                        robot.Position.X, robot.Position.Y, robot.Config.CollisionRadius, cellSize);
+
+                    var validCandidates = overlappingGrids
+                        .Where(g => Map.IsInside(g) && !Map.IsObstacle(g))
+                        .ToList();
+
+                    if (validCandidates.Count > 0)
+                    {
+                        if (!ReservationManager.TryAcquireMultiGridOverlapLock(robotId, validCandidates, out string overlapFail))
+                        {
+                            return NavigationResult.Fail($"机器人处于交汇区域，安全包络锁定失败: {overlapFail}");
+                        }
+
+                        // 启发式择优归正锚点：优先朝向目标终点、次选欧氏距离最近且未被其他车占用的候选网格
+                        startGrid = validCandidates
+                            .Where(g => ReservationManager.CanEnterGrid(robotId, g, out _))
+                            .OrderBy(g => Math.Abs(g.X - target.X) + Math.Abs(g.Y - target.Y))
+                            .ThenBy(g => robot.Position.DistanceTo((g.X + 0.5f) * cellSize, (g.Y + 0.5f) * cellSize))
+                            .FirstOrDefault();
+
+                        if (startGrid == GridPoint.Empty)
+                        {
+                            startGrid = validCandidates[0];
+                        }
+                    }
+                }
+
+                if (startGrid == target && (!isOffCenter && (controller.IsPathCompleted || !controller.HasPath)))
+                {
+                    return NavigationResult.Fail("机器人当前已处于目标点网格！");
+                }
+
+                var planner = customPlanner ?? PathPlanner;
+                if (planner == null)
+                {
+                    return NavigationResult.Fail("未配置有效的路径规划算法");
+                }
+
+                var planResult = planner.PlanPath(Map, startGrid, target);
+                if (!planResult.Success || planResult.Path == null || planResult.Path.Count == 0)
+                {
+                    return NavigationResult.Fail(string.IsNullOrEmpty(planResult.ErrorMessage) ? "未找到到达目标点的连通路径！" : planResult.ErrorMessage);
+                }
+
+                // 彻底释放机器人旧路径残留的所有预约栅格与未通行边，保留当前已占有的物理栅格
+                ReservationManager.ReleaseRobotReservations(robotId, startGrid);
+
+                int startTargetIdx = isOffCenter ? 0 : 1;
+                controller.SetPath(planResult.Path, initialAuthorizedIndex: planResult.Path.Count - 1, startTargetIndex: startTargetIdx);
+
+                // 单机模式下同步在管理器中锁定新路径全部预约资源
+                if (_robots.Count <= 1)
+                {
+                    for (int i = 0; i < planResult.Path.Count - 1; i++)
+                    {
+                        var from = planResult.Path[i];
+                        var to = planResult.Path[i + 1];
+                        ReservationManager.TryAcquireStepAuthorization(robotId, from, to, out _);
+                    }
+                }
+
+                if (!IsRunning || IsPaused)
+                {
+                    Start();
+                }
+
+                PublishSnapshot();
+                return NavigationResult.Ok(planResult.Path, $"成功启动导航 -> [{target.X}, {target.Y}]");
+            }
+        }
+
+        public bool CancelNavigation(int robotId)
+        {
+            // 取消指定机器人的当前导航路径并下发制动信号。
+            lock (_stateLock)
+            {
+                var robot = GetRobot(robotId);
+                if (robot == null) return false;
+
+                if (_motionControllers.TryGetValue(robotId, out var controller))
+                {
+                    controller.ClearPath();
+                }
+
+                // 取消导航时释放该机器人前方所有尚未通行的预约资源
+                ReservationManager.ReleaseRobotReservations(robotId, robot.ConfirmedGrid);
+
+                robot.ExecuteCommand(RobotCommand.Brake());
+                PublishSnapshot();
+                return true;
+            }
+        }
+
         public void SetRobots(IEnumerable<SimulatedRobot> robots)
         {
             // 重新批量部署并配置仿真机群。
@@ -249,9 +390,10 @@ namespace WarehouseGridSimulation.Core.Engine
                 if (_motionControllers.TryGetValue(robot.Id, out var controller) && controller.HasPath && !controller.IsPathCompleted)
                 {
                     // 检查是否需要申请前方栅格与边的通行授权
-                    // 只要当前授权尚未到达路径终点，且未超过预看上限，就尝试为下一段申请授权
+                    // 单机无冲突场景全量预看授权以实现全速巡航，多机场景受预看步数防死锁约束
+                    int lookaheadSteps = (_robots.Count <= 1) ? 9999 : Config.LookaheadAuthorizationSteps;
                     while (controller.AuthorizedIndex < controller.CurrentPath.Count - 1 &&
-                           controller.AuthorizedIndex < controller.CurrentTargetIndex + Config.LookaheadAuthorizationSteps)
+                           controller.AuthorizedIndex < controller.CurrentTargetIndex + lookaheadSteps)
                     {
                         int fromIndex = controller.AuthorizedIndex;
                         int toIndex = fromIndex + 1;
@@ -309,25 +451,31 @@ namespace WarehouseGridSimulation.Core.Engine
                 }
             }
 
-            // 步骤 8：更新任务与资源占用 (释放已完全退出的区域)
+            // 步骤 8：更新任务与资源占用 (基于地标确认执行双格安全锁交接与释放)
             foreach (var robot in _robots)
             {
                 if (_motionControllers.TryGetValue(robot.Id, out var controller))
                 {
                     if (controller.HasPath && controller.CurrentTargetIndex < controller.CurrentPath.Count)
                     {
-                        GridPoint prevGrid = controller.CurrentTargetIndex > 0
-                            ? controller.CurrentPath[controller.CurrentTargetIndex - 1]
-                            : robot.GridPosition;
+                        GridPoint lastConfirmed = controller.LastConfirmedGrid;
                         GridPoint targetGrid = controller.CurrentPath[controller.CurrentTargetIndex];
 
                         ReservationManager.UpdateOccupancyAndRelease(
                             robot.Id,
-                            prevGrid,
+                            lastConfirmed,
                             targetGrid,
-                            robot.Position,
-                            cellSize,
-                            robot.Config.CollisionRadius);
+                            robot.ConfirmedGrid);
+
+                        ReservationManager.SweepHistoricalReservations(
+                            robot.Id,
+                            controller.CurrentPath,
+                            robot.ConfirmedGrid);
+
+                        if (robot.ConfirmedGrid == targetGrid)
+                        {
+                            controller.AdvanceConfirmedGrid(targetGrid);
+                        }
                     }
 
                     // 检查机器人是否到达终点停稳
@@ -388,6 +536,7 @@ namespace WarehouseGridSimulation.Core.Engine
                     HasCargo = r.HasCargo,
                     CurrentTaskId = r.CurrentTaskId,
                     CurrentPath = mc?.CurrentPath?.ToList() ?? new List<GridPoint>(),
+                    CurrentTargetIndex = mc?.CurrentTargetIndex ?? 0,
                     TargetGrid = mc?.CurrentTargetGrid,
                     IsAwaitingAuthorization = mc?.IsAwaitingAuthorization ?? false,
                     WaitTimeSeconds = ReservationManager.GetRobotWaitTime(r.Id)

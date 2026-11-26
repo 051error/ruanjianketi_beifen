@@ -1,7 +1,9 @@
 using System;
 using System.Linq;
 using WarehouseGridSimulation.Core.Engine;
+using WarehouseGridSimulation.Core.Geometry;
 using WarehouseGridSimulation.Core.Map;
+using WarehouseGridSimulation.Core.Planning;
 using WarehouseGridSimulation.Core.Robots;
 
 namespace WarehouseGridSimulation.Core.App
@@ -117,6 +119,20 @@ namespace WarehouseGridSimulation.Core.App
             var drop = drops[rnd.Next(drops.Count)];
 
             return CreateTransportTask(pick.Id, drop.Id, rnd.Next(1, 4));
+        }
+
+        public NavigationResult NavigateRobot(int robotId, GridPoint target, IPathPlanner customPlanner = null)
+        {
+            // 通过外观调度指定机器人执行导航移动。
+            // robotId: 目标机器人编号; target: 目标网格坐标; customPlanner: 定制规划器。
+            if (Engine == null) return NavigationResult.Fail("仿真引擎未就绪");
+            return Engine.NavigateRobot(robotId, target, customPlanner);
+        }
+
+        public bool CancelNavigation(int robotId)
+        {
+            // 通过外观取消指定机器人的导航并执行安全制动。
+            return Engine?.CancelNavigation(robotId) ?? false;
         }
 
         /// <summary>

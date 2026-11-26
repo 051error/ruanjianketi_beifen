@@ -17,6 +17,7 @@ namespace WarehouseGridSimulation.Core.Robots
         public float LinearDeceleration { get; set; } = 2.0f; // 线减速度 (m/s^2)
         public float TurnSpeed { get; set; } = (float)Math.PI; // 最大角速度 (rad/s, 180°/s)
         public float AngularAcceleration { get; set; } = 2f * (float)Math.PI; // 最大角加速度 (rad/s^2, 360°/s^2)
+        public float AngularDeceleration { get; set; } = 2f * (float)Math.PI; // 最大角减速度 (rad/s^2, 360°/s^2)
 
         public float ChassisLength { get; set; } = 0.42f; // 底盘长度 (米)
         public float ChassisWidth { get; set; } = 0.38f; // 底盘宽度 (米)
@@ -25,6 +26,11 @@ namespace WarehouseGridSimulation.Core.Robots
         public float PositionTolerance { get; set; } = 0.05f; // 到位距离容差 (米)
         public float HeadingTolerance { get; set; } = 0.05f; // 航向角对齐容差 (弧度)
         public float SpeedTolerance { get; set; } = 0.05f; // 停止判定速度容差 (m/s)
+
+        public float CreepThreshold { get; set; } = 0.08f; // 切换到闭环精对准的剩余距离门限 (米)
+        public float CreepMaxSpeed { get; set; } = 0.2f; // 闭环低速对准阶段最大爬行线速度 (m/s)
+        public float AlignmentKp { get; set; } = 2.0f; // 到站对齐纵向比例增益
+        public float AlignmentKd { get; set; } = 0.1f; // 到站对齐纵向微分增益
 
         public RobotConfig Clone()
         {
