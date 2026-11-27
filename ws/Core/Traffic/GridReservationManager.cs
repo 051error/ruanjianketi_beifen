@@ -23,8 +23,15 @@ namespace WarehouseGridSimulation.Core.Traffic
 
         // 机器人等待时间统计 (秒)
         private readonly Dictionary<int, float> _waitTimes = new Dictionary<int, float>();
+        // 机器人历史确认地标足迹 (用于三格移动闭塞延迟一格安全释放)
+        private readonly Dictionary<int, List<GridPoint>> _confirmedFootprints = new Dictionary<int, List<GridPoint>>();
 
         public float LongWaitThresholdSeconds { get; set; } = 3.0f;
+
+        /// <summary>
+        /// 三格移动闭塞延迟释放模式 (默认在到达目标点后释放除当前目标点外的所有资源，作为当前多机调度的预约机制)。
+        /// </summary>
+        public ThreeGridDelayReleaseMode DelayReleaseMode { get; set; } = ThreeGridDelayReleaseMode.ReleaseAllExceptDestinationOnArrival;
 
         public event Action<int, GridPoint, float, string> LongWaitDetected;
 
@@ -38,12 +45,14 @@ namespace WarehouseGridSimulation.Core.Traffic
             _reservedGrids.Clear();
             _reservedEdges.Clear();
             _waitTimes.Clear();
+            _confirmedFootprints.Clear();
         }
 
         public void RegisterRobotInitialGrid(int robotId, GridPoint grid)
         {
             _occupiedGrids[grid] = robotId;
             _waitTimes[robotId] = 0f;
+            _confirmedFootprints[robotId] = new List<GridPoint> { grid };
         }
 
         public void ReleaseRobotReservations(int robotId, GridPoint preserveGrid)
@@ -90,6 +99,14 @@ namespace WarehouseGridSimulation.Core.Traffic
             }
 
             _occupiedGrids[preserveGrid] = robotId;
+            _confirmedFootprints[robotId] = new List<GridPoint> { preserveGrid };
+        }
+
+        public static long GetDirectedEdgeKey(GridPoint from, GridPoint to)
+        {
+            int fromCode = (from.X & 0xFFFF) | ((from.Y & 0xFFFF) << 16);
+            int toCode = (to.X & 0xFFFF) | ((to.Y & 0xFFFF) << 16);
+            return ((long)fromCode << 32) | (long)(uint)toCode;
         }
 
         public static long GetUndirectedEdgeKey(GridPoint u, GridPoint v)
@@ -133,8 +150,17 @@ namespace WarehouseGridSimulation.Core.Traffic
             conflictReason = null;
             if (from == to) return true;
 
-            long edgeKey = GetUndirectedEdgeKey(from, to);
-            if (_reservedEdges.TryGetValue(edgeKey, out int edgeHolder) && edgeHolder != robotId)
+            // 1. 迎面对穿坚决拦截 (对方正在逆向通行 to -> from)
+            long reverseKey = GetDirectedEdgeKey(to, from);
+            if (_reservedEdges.TryGetValue(reverseKey, out int oppHolder) && oppHolder != robotId)
+            {
+                conflictReason = $"边 ({from} <-> {to}) 正被机器人 #{oppHolder} 迎面逆向对穿占用";
+                return false;
+            }
+
+            // 2. 兼容性无向边锁校验
+            long undirectedKey = GetUndirectedEdgeKey(from, to);
+            if (_reservedEdges.TryGetValue(undirectedKey, out int edgeHolder) && edgeHolder != robotId)
             {
                 conflictReason = $"边 ({from} <-> {to}) 正被机器人 #{edgeHolder} 占用/对向通行";
                 return false;
@@ -158,12 +184,12 @@ namespace WarehouseGridSimulation.Core.Traffic
                 return false;
             }
 
-            // 授权成功，锁定目标栅格与边
+            // 授权成功，锁定目标栅格与有向通行边
             _reservedGrids[to] = robotId;
             if (from != to)
             {
-                long edgeKey = GetUndirectedEdgeKey(from, to);
-                _reservedEdges[edgeKey] = robotId;
+                long directedKey = GetDirectedEdgeKey(from, to);
+                _reservedEdges[directedKey] = robotId;
             }
 
             _waitTimes[robotId] = 0f;
@@ -194,9 +220,41 @@ namespace WarehouseGridSimulation.Core.Traffic
             return t;
         }
 
+        public int? GetBlockingRobotId(int robotId, GridPoint from, GridPoint to)
+        {
+            // 查询阻碍指定机器人通行的目标栅格或通道边的占用者编号。
+            // to: 目标栅格坐标。
+            if (_occupiedGrids.TryGetValue(to, out int occupant) && occupant != robotId)
+            {
+                return occupant;
+            }
+
+            if (_reservedGrids.TryGetValue(to, out int reserver) && reserver != robotId)
+            {
+                return reserver;
+            }
+
+            if (from != to)
+            {
+                long reverseKey = GetDirectedEdgeKey(to, from);
+                if (_reservedEdges.TryGetValue(reverseKey, out int oppHolder) && oppHolder != robotId)
+                {
+                    return oppHolder;
+                }
+
+                long undirectedKey = GetUndirectedEdgeKey(from, to);
+                if (_reservedEdges.TryGetValue(undirectedKey, out int edgeHolder) && edgeHolder != robotId)
+                {
+                    return edgeHolder;
+                }
+            }
+
+            return null;
+        }
+
         /// <summary>
-        /// 当机器人完全退出上一栅格、进入并稳定在目标栅格时，更新实际占用并释放原栅格和边资源。
-        /// 仅凭逻辑判定不足，需结合机器人当前物理中心是否已离开原栅格范围。
+        /// 基于三格闭塞安全锁机制：小车扫码确认进入目标栅格时立项物理占用，推迟一格释放原栅格和边资源。
+        /// 只有当小车进一步对准第二新地标 G_i 时，才释放 G_{i-2}，从而为小车尾部提供一整格身后的绝对安全空间。
         /// </summary>
         public void UpdateOccupancyAndRelease(
             int robotId,
@@ -204,36 +262,121 @@ namespace WarehouseGridSimulation.Core.Traffic
             GridPoint targetGrid,
             GridPoint currentConfirmedGrid)
         {
-            // 基于地标确认执行原子交接与双格安全锁释放。
-            // lastConfirmedGrid: 机器人上一个已确认离开的地标栅格; currentConfirmedGrid: 机器人当前传感器扫描确认的地标栅格。
+            // 基于地标确认执行原子交接与三格移动闭塞延迟释放。
+            // lastConfirmedGrid: 机器人上一个已确认的地标栅格; currentConfirmedGrid: 机器人当前传感器扫描确认的地标栅格。
             if (currentConfirmedGrid != targetGrid)
             {
-                // 未扫码确认对准目标地标，保持双格安全锁状态以防追尾
+                // 未扫码确认对准目标地标，保持多格闭塞安全锁状态以防追尾
                 return;
             }
 
-            // 机器人确认进入目标栅格地标：原子化确立占用
+            // 机器人确认进入目标栅格地标：确立物理占用并移出预约
             _occupiedGrids[targetGrid] = robotId;
             _reservedGrids.Remove(targetGrid);
 
-            // 彻底释放上一地标与通道边占用
-            if (lastConfirmedGrid != targetGrid)
+            if (!_confirmedFootprints.TryGetValue(robotId, out var footprints))
             {
-                if (_occupiedGrids.TryGetValue(lastConfirmedGrid, out int occupant) && occupant == robotId)
+                footprints = new List<GridPoint>();
+                _confirmedFootprints[robotId] = footprints;
+            }
+
+            if (footprints.Count == 0 || footprints[^1] != targetGrid)
+            {
+                footprints.Add(targetGrid);
+            }
+
+            // 核心关键：延迟一格释放 (G_i 确认时释放 G_{i-2} 及其边锁，保留 G_i 与 G_{i-1} 物理占用)
+            if (footprints.Count >= 3)
+            {
+                var twoStepsBehind = footprints[^3];
+                var oneStepBehind = footprints[^2];
+
+                if (_occupiedGrids.TryGetValue(twoStepsBehind, out int occupant) && occupant == robotId)
                 {
-                    _occupiedGrids.Remove(lastConfirmedGrid);
+                    _occupiedGrids.Remove(twoStepsBehind);
                 }
-                long edgeKey = GetUndirectedEdgeKey(lastConfirmedGrid, targetGrid);
-                if (_reservedEdges.TryGetValue(edgeKey, out int edgeOwner) && edgeOwner == robotId)
+
+                _reservedEdges.Remove(GetDirectedEdgeKey(twoStepsBehind, oneStepBehind));
+                _reservedEdges.Remove(GetUndirectedEdgeKey(twoStepsBehind, oneStepBehind));
+            }
+        }
+
+        public void ReleaseTrailOnDestinationReached(int robotId, GridPoint destinationGrid)
+        {
+            // 当机器人到达最终目的地并停稳时，清理先前滞留的身后旧地标占用与边锁，仅保留最终停车栅格。
+            // destinationGrid: 机器人停靠的目标终点栅格。
+            if (_confirmedFootprints.TryGetValue(robotId, out var footprints))
+            {
+                for (int i = 0; i < footprints.Count - 1; i++)
                 {
-                    _reservedEdges.Remove(edgeKey);
+                    var pastGrid = footprints[i];
+                    if (pastGrid != destinationGrid)
+                    {
+                        if (_occupiedGrids.TryGetValue(pastGrid, out int occupant) && occupant == robotId)
+                        {
+                            _occupiedGrids.Remove(pastGrid);
+                        }
+                    }
                 }
+
+                _confirmedFootprints[robotId] = new List<GridPoint> { destinationGrid };
+            }
+
+            // 到达终点停稳后彻底清空所有通道边锁，杜绝滞留阻挡后车
+            var edgeKeysToRemove = new List<long>();
+            foreach (var kvp in _reservedEdges)
+            {
+                if (kvp.Value == robotId) edgeKeysToRemove.Add(kvp.Key);
+            }
+            foreach (var key in edgeKeysToRemove) _reservedEdges.Remove(key);
+
+            _occupiedGrids[destinationGrid] = robotId;
+        }
+
+        public void OnDestinationReached(int robotId, GridPoint destinationGrid)
+        {
+            // 根据延迟释放模式处理机器人到达最终目标点后的占用资源与边锁释放。
+            if (DelayReleaseMode == ThreeGridDelayReleaseMode.ReleaseAllExceptDestinationOnArrival)
+            {
+                ReleaseTrailOnDestinationReached(robotId, destinationGrid);
+            }
+            else
+            {
+                // LMAPF 模式：保留终点与身后上一格延迟保护，但彻底清空全部历史通道边锁与更早的栅格占用
+                if (_confirmedFootprints.TryGetValue(robotId, out var footprints))
+                {
+                    if (footprints.Count >= 3)
+                    {
+                        for (int i = 0; i < footprints.Count - 2; i++)
+                        {
+                            var earlyGrid = footprints[i];
+                            if (earlyGrid != destinationGrid)
+                            {
+                                if (_occupiedGrids.TryGetValue(earlyGrid, out int occupant) && occupant == robotId)
+                                {
+                                    _occupiedGrids.Remove(earlyGrid);
+                                }
+                            }
+                        }
+                        var prevGrid = footprints[^2];
+                        _confirmedFootprints[robotId] = new List<GridPoint> { prevGrid, destinationGrid };
+                    }
+                }
+
+                var edgeKeysToRemove = new List<long>();
+                foreach (var kvp in _reservedEdges)
+                {
+                    if (kvp.Value == robotId) edgeKeysToRemove.Add(kvp.Key);
+                }
+                foreach (var key in edgeKeysToRemove) _reservedEdges.Remove(key);
+
+                _occupiedGrids[destinationGrid] = robotId;
             }
         }
 
         public void SweepHistoricalReservations(int robotId, IReadOnlyList<GridPoint> path, GridPoint currentConfirmedGrid)
         {
-            // 扫描并彻底释放机器人沿规划路径已经驶离且确认退出的所有历史栅格与通道边。
+            // 扫描并释放机器人沿规划路径更早前驶离的历史栅格与通道边，但保留身后上一格以维持三格闭塞安全锁。
             // path: 机器人当前遵循的规划路径; currentConfirmedGrid: 机器人当前最新扫码确认所处的物理栅格。
             if (path == null || path.Count == 0) return;
 
@@ -247,9 +390,11 @@ namespace WarehouseGridSimulation.Core.Traffic
                 }
             }
 
-            if (confirmedIndex <= 0) return;
+            // 保持身后上一格安全占用，仅清扫 confirmedIndex - 2 及更早的历史栅格与边
+            int sweepUntil = confirmedIndex - 1;
+            if (sweepUntil <= 0) return;
 
-            for (int i = 0; i < confirmedIndex; i++)
+            for (int i = 0; i < sweepUntil; i++)
             {
                 var pastGrid = path[i];
                 if (pastGrid != currentConfirmedGrid)
@@ -267,11 +412,8 @@ namespace WarehouseGridSimulation.Core.Traffic
                 if (i < path.Count - 1)
                 {
                     var nextGrid = path[i + 1];
-                    long edgeKey = GetUndirectedEdgeKey(pastGrid, nextGrid);
-                    if (_reservedEdges.TryGetValue(edgeKey, out int edgeOwner) && edgeOwner == robotId)
-                    {
-                        _reservedEdges.Remove(edgeKey);
-                    }
+                    _reservedEdges.Remove(GetDirectedEdgeKey(pastGrid, nextGrid));
+                    _reservedEdges.Remove(GetUndirectedEdgeKey(pastGrid, nextGrid));
                 }
             }
         }

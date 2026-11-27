@@ -14,7 +14,7 @@ namespace WarehouseGridSimulation.Core.App
     /// 作为 UI 交互宿主、测试用例与底层仿真引擎间的唯一权威交互界面。
     /// UI 只能通过该类发送控制意图与读取快照，严禁绕过该类直接篡改机器人位姿或预约状态。
     /// </summary>
-    public class SimulationApp
+    public class SimulationApp : IDisposable
     {
         public SimulationEngine Engine { get; private set; }
         public GridMap CurrentMap => Engine?.Map;
@@ -44,8 +44,10 @@ namespace WarehouseGridSimulation.Core.App
 
         private void InitializeEngineWithMap(GridMap map, MapData data)
         {
+            bool enableBg = Engine?.Config?.EnableBackgroundWorker ?? false;
+            Engine?.Dispose();
             CurrentMapData = data;
-            Engine = new SimulationEngine(map);
+            Engine = new SimulationEngine(map, new SimulationConfig { EnableBackgroundWorker = enableBg });
             Engine.SnapshotPublished += snapshot => SnapshotUpdated?.Invoke(snapshot);
             Engine.LogEmitted += log => LogEmitted?.Invoke(log);
 
@@ -218,10 +220,6 @@ namespace WarehouseGridSimulation.Core.App
         public SimulationSnapshot RunHeadless(int tickCount)
         {
             if (Engine == null) return null;
-            if (!Engine.IsRunning && !Engine.IsPaused)
-            {
-                Engine.Start();
-            }
 
             SimulationSnapshot last = null;
             for (int i = 0; i < tickCount; i++)
@@ -229,6 +227,12 @@ namespace WarehouseGridSimulation.Core.App
                 last = Engine.StepSingleTick();
             }
             return last;
+        }
+
+        public void Dispose()
+        {
+            // 释放底层仿真引擎资源。
+            Engine?.Dispose();
         }
     }
 

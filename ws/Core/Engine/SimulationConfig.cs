@@ -1,3 +1,5 @@
+using WarehouseGridSimulation.Core.Traffic;
+
 namespace WarehouseGridSimulation.Core.Engine
 {
     /// <summary>
@@ -24,5 +26,30 @@ namespace WarehouseGridSimulation.Core.Engine
         /// 检测到循环等待死锁时是否自动触发在线协同重规划自适应脱困。
         /// </summary>
         public bool AutoReplanningOnDeadlock { get; set; } = true;
+
+        /// <summary>
+        /// 三格移动闭塞延迟释放策略模式 (默认到达目标点后释放除终点外的所有资源，作为当前多机调度的预约机制)。
+        /// </summary>
+        public ThreeGridDelayReleaseMode DelayReleaseMode { get; set; } = ThreeGridDelayReleaseMode.ReleaseAllExceptDestinationOnArrival;
+
+        /// <summary>
+        /// 局部死锁自愈无解时，是否允许自动升级触发全局全机群时空协同重规划 (Tier 3 保底机制)。
+        /// </summary>
+        public bool EnableGlobalReplanningOnDeadlock { get; set; } = true;
+
+        /// <summary>
+        /// 全局协同重规划触发防抖冷却时间 (秒)，避免高密度拥堵下连续高频触发全局重算。
+        /// </summary>
+        public float GlobalReplanningCooldownSeconds { get; set; } = 2.0f;
+
+        /// <summary>
+        /// 全局多智能体协同重规划求解超时上限 (毫秒)，提供充裕的时空协调求解预算。
+        /// </summary>
+        public int GlobalReplanningTimeoutMs { get; set; } = 3500;
+
+        /// <summary>
+        /// 是否启用后台独立工作线程自驱动物理仿真步进 (UI 宿主模式下启用，与渲染线程彻底解耦；离散单步测试模式下可禁用)。
+        /// </summary>
+        public bool EnableBackgroundWorker { get; set; } = false;
     }
 }

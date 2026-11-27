@@ -41,7 +41,12 @@ namespace WarehouseGridSimulation.Core.Traffic
         /// <summary>
         /// 静态车位/到站停泊车阻挡（前车已完成任务停稳，需在途车自主动态绕障重规划）。
         /// </summary>
-        StationaryBlockage = 5
+        StationaryBlockage = 5,
+
+        /// <summary>
+        /// 级联长等待/饿死受阻（等待前车或前方死锁区域过久超过超时阈值，需触发应急自主绕障重规划）。
+        /// </summary>
+        CascadingLongWaitBlockage = 6
     }
 
     /// <summary>
@@ -107,11 +112,13 @@ namespace WarehouseGridSimulation.Core.Traffic
         public List<DeadlockCycle> DeadlockCycles { get; } = new List<DeadlockCycle>();
         public List<DependencyRelation> AllDependencies { get; } = new List<DependencyRelation>();
         public List<int> StationaryBlockedAgents { get; } = new List<int>();
+        public List<int> LongWaitBlockedAgents { get; } = new List<int>();
         public string ResolutionDetails { get; set; } = string.Empty;
 
         public bool IsDeadlockActive => Status == DeadlockStatus.NeedGlobalReplanning ||
                                         Status == DeadlockStatus.DeadlockConfirmed ||
-                                        Status == DeadlockStatus.StationaryBlockage;
+                                        Status == DeadlockStatus.StationaryBlockage ||
+                                        Status == DeadlockStatus.CascadingLongWaitBlockage;
     }
 
     /// <summary>
@@ -122,6 +129,7 @@ namespace WarehouseGridSimulation.Core.Traffic
     {
         public double StallThresholdSeconds { get; set; } = 0.6;
         public double DeadlockConfirmationSeconds { get; set; } = 0.4;
+        public double LongWaitThresholdSeconds { get; set; } = 3.5;
 
         private readonly Dictionary<int, double> _lastProgressTime = new Dictionary<int, double>();
         private readonly Dictionary<int, GridPoint> _lastProgressGrid = new Dictionary<int, GridPoint>();
@@ -164,7 +172,12 @@ namespace WarehouseGridSimulation.Core.Traffic
                     continue;
                 }
 
-                if (!_lastProgressGrid.TryGetValue(r.Id, out var lastGrid) || lastGrid != r.ConfirmedGrid || r.LinearVelocity > 0.05f)
+                // 排除合法旋转与运动状态：处于旋转模式、具有显著角速度、具有线速度或发生栅格位移，均非死锁停滞
+                bool isRotating = r.MotionState == RobotMotionState.TurningLeft ||
+                                  r.MotionState == RobotMotionState.TurningRight ||
+                                  Math.Abs(r.AngularVelocity) > 0.05f;
+
+                if (isRotating || !_lastProgressGrid.TryGetValue(r.Id, out var lastGrid) || lastGrid != r.ConfirmedGrid || r.LinearVelocity > 0.05f)
                 {
                     _lastProgressGrid[r.Id] = r.ConfirmedGrid;
                     _lastProgressTime[r.Id] = currentSimSeconds;
@@ -237,11 +250,16 @@ namespace WarehouseGridSimulation.Core.Traffic
                     }
                 }
 
-                // 2.2 检查无向边持有者 (对向通道逆穿占用)
+                // 2.2 检查通道边持有者 (对向通道逆穿占用)
                 if (fromGrid != nextGrid)
                 {
-                    long edgeKey = GridReservationManager.GetUndirectedEdgeKey(fromGrid, nextGrid);
-                    if (reservations.ReservedEdges.TryGetValue(edgeKey, out int edgeHolder) && edgeHolder != waitingId)
+                    long revKey = GridReservationManager.GetDirectedEdgeKey(nextGrid, fromGrid);
+                    long unKey = GridReservationManager.GetUndirectedEdgeKey(fromGrid, nextGrid);
+                    int edgeHolder = -1;
+                    if (reservations.ReservedEdges.TryGetValue(revKey, out int h1) && h1 != waitingId) edgeHolder = h1;
+                    else if (reservations.ReservedEdges.TryGetValue(unKey, out int h2) && h2 != waitingId) edgeHolder = h2;
+
+                    if (edgeHolder >= 0)
                     {
                         var dep = new DependencyRelation(waitingId, edgeHolder, nextGrid, ResourceBlockType.EdgeLocked, $"通道边 ({fromGrid}<->{nextGrid}) 被机器人 #{edgeHolder} 逆向或重叠占用");
                         waitGraph[waitingId].Add(dep);
@@ -264,7 +282,28 @@ namespace WarehouseGridSimulation.Core.Traffic
                     return report;
                 }
 
-                // 无环路且前车在移动：属于正常通道排队等待前车释放
+                // 无环路：检查是否存在受阻等待时间超过阈值的长等待车辆
+                var longWaitCandidates = new List<int>();
+                foreach (int stalledId in stalledCandidates)
+                {
+                    float waitSec = reservations.GetRobotWaitTime(stalledId);
+                    double stallDuration = currentSimSeconds - (_lastProgressTime.TryGetValue(stalledId, out double pt) ? pt : currentSimSeconds);
+                    if (waitSec >= (float)LongWaitThresholdSeconds || stallDuration >= LongWaitThresholdSeconds)
+                    {
+                        longWaitCandidates.Add(stalledId);
+                    }
+                }
+
+                if (longWaitCandidates.Count > 0)
+                {
+                    report.Status = DeadlockStatus.CascadingLongWaitBlockage;
+                    report.LongWaitBlockedAgents.AddRange(longWaitCandidates.Distinct());
+                    var blockedDesc = string.Join(", ", report.LongWaitBlockedAgents.Select(id => $"#{id}"));
+                    report.ResolutionDetails = $"在途机器人 [{blockedDesc}] 等待资源超过 {LongWaitThresholdSeconds:F1}s，请求触发单车自主动态绕障重规划";
+                    return report;
+                }
+
+                // 无环路且前车在移动且未超时：属于正常通道排队等待前车释放
                 report.Status = DeadlockStatus.TransitiveBlockage;
                 report.ResolutionDetails = "机群处于正常队列排队等待状态，无环路死锁";
                 return report;

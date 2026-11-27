@@ -37,6 +37,7 @@ namespace WarehouseGridSimulation.Skia.Forms
         private ComboBox _cmbRobotCount;
         private Button _btnRandomizeRobots;
         private CheckBox _chkShowTargetLines;
+        private CheckBox _chkEndlessMode;
         private ComboBox _cmbMultiAlgorithm;
         private Panel _pnlWhcaParams;
         private NumericUpDown _numWhcaK;
@@ -393,6 +394,23 @@ namespace WarehouseGridSimulation.Skia.Forms
                 _skiaCanvas?.Invalidate();
             };
             _pnlMultiMode.Controls.Add(_chkShowTargetLines);
+            mY += 26;
+
+            _chkEndlessMode = new CheckBox();
+            _chkEndlessMode.Text = "开启无尽模式 (持续对角巡航)";
+            _chkEndlessMode.Font = new Font("Microsoft YaHei", 9f);
+            _chkEndlessMode.Checked = false;
+            _chkEndlessMode.ForeColor = Color.FromArgb(180, 80, 0);
+            _chkEndlessMode.Location = new Point(14, mY);
+            _chkEndlessMode.Size = new Size(250, 24);
+            _chkEndlessMode.CheckedChanged += delegate
+            {
+                if (_multiRobotPresenter != null)
+                {
+                    _multiRobotPresenter.IsEndlessMode = _chkEndlessMode.Checked;
+                }
+            };
+            _pnlMultiMode.Controls.Add(_chkEndlessMode);
             mY += 28;
 
             _pnlMultiMode.Controls.Add(CreateHorizontalSeparator(mY));

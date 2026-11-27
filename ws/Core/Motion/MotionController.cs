@@ -135,6 +135,31 @@ namespace WarehouseGridSimulation.Core.Motion
             return (float)Math.Sqrt(dx * dx + dy * dy);
         }
 
+        private float CalculateDistanceToAuthorizedEnd(SimulatedRobot robot, float cellSizeMeters)
+        {
+            // 计算机器人当前物理位置沿路径折线到达当前授权终点或最终目标点的总物理剩余距离。
+            if (CurrentPath == null || CurrentPath.Count == 0) return 0f;
+
+            int targetIndex = Math.Clamp(CurrentTargetIndex, 0, CurrentPath.Count - 1);
+            int authIndex = Math.Clamp(AuthorizedIndex, targetIndex, CurrentPath.Count - 1);
+
+            var currTargetGrid = CurrentPath[targetIndex];
+            float tx = (currTargetGrid.X + 0.5f) * cellSizeMeters;
+            float ty = (currTargetGrid.Y + 0.5f) * cellSizeMeters;
+            float dist = robot.Position.DistanceTo(tx, ty);
+
+            for (int i = targetIndex; i < authIndex; i++)
+            {
+                var p1 = CurrentPath[i];
+                var p2 = CurrentPath[i + 1];
+                int dx = Math.Abs(p1.X - p2.X);
+                int dy = Math.Abs(p1.Y - p2.Y);
+                dist += (dx + dy) * cellSizeMeters;
+            }
+
+            return dist;
+        }
+
         public RobotCommand ComputeNextCommand(SimulatedRobot robot, float cellSizeMeters, float dt)
         {
             // 计算当前仿真步长下应下发给机器人的基础控制指令。
@@ -192,24 +217,43 @@ namespace WarehouseGridSimulation.Core.Motion
             }
             else if (isAuthorizedSegmentEnd || isNextTurn || isHomeDocking)
             {
-                // 授权终点、前方拐弯或就近归正锚点：必须减速停稳在当前栅格中心
-                if (dist <= 0.01f || projRemaining <= 0.003f)
+                // 授权终点、前方拐弯或就近归正锚点：严格由当前 PID 纵向纠偏对准在当前栅格中心并停稳
+                bool isDocked = (dist <= 0.008f) || (projRemaining <= 0.003f && dist <= 0.012f);
+                if (isDocked)
                 {
                     if (robot.LinearVelocity <= robot.Config.SpeedTolerance)
                     {
                         _dockingPid.Reset();
-                        if (isAuthorizedSegmentEnd)
+
+                        // 归正锚点 (第0格) 对齐停稳后，无条件切换至第 1 个航段目标节点
+                        if (isHomeDocking)
+                        {
+                            CurrentTargetIndex++;
+                            if (CurrentTargetIndex >= CurrentPath.Count)
+                            {
+                                IsPathCompleted = true;
+                                return RobotCommand.Stop;
+                            }
+                            if (CurrentTargetIndex > AuthorizedIndex)
+                            {
+                                IsAwaitingAuthorization = true;
+                                return RobotCommand.Stop;
+                            }
+                        }
+                        else if (isAuthorizedSegmentEnd)
                         {
                             IsAwaitingAuthorization = true;
                             return RobotCommand.Stop;
                         }
-
-                        // 转向点或归正锚点中心停稳后切换到下一节点进行转向，由真实运动学闭环推进
-                        CurrentTargetIndex++;
-                        if (CurrentTargetIndex >= CurrentPath.Count)
+                        else
                         {
-                            IsPathCompleted = true;
-                            return RobotCommand.Stop;
+                            // 转向点中心停稳后切换到下一节点进行转向，由真实运动学闭环推进
+                            CurrentTargetIndex++;
+                            if (CurrentTargetIndex >= CurrentPath.Count)
+                            {
+                                IsPathCompleted = true;
+                                return RobotCommand.Stop;
+                            }
                         }
                     }
                     else
@@ -273,11 +317,22 @@ namespace WarehouseGridSimulation.Core.Motion
 
             // 4. 到站或转弯前动力学减速与闭环 PID 精准对位判断
             bool requiresBrakingToStop = isFinalNode || isAuthorizedSegmentEnd || isNextTurn || isHomeDocking;
+            bool isBrakingForAuthEnd = false;
+
+            // 动力学提前制动前瞻：计算以当前速度滑行至授权终点所需的物理制动滑行距离，若逼近授权终点则强制进入减速
+            float distToAuthEnd = CalculateDistanceToAuthorizedEnd(robot, cellSizeMeters);
+            float stoppingDistance = (robot.LinearVelocity * robot.LinearVelocity) / (2f * robot.Config.LinearDeceleration);
+            if (distToAuthEnd <= stoppingDistance + 0.15f)
+            {
+                requiresBrakingToStop = true;
+                isBrakingForAuthEnd = true;
+            }
 
             if (requiresBrakingToStop)
             {
-                // 仅当物理线速度已降为低速且剩余距离进入精对位蠕动门限时，才启动闭环微调
-                if (projRemaining <= robot.Config.CreepThreshold && robot.LinearVelocity <= 0.25f)
+                // 仅当当前节点即为停车对齐目标且物理线速度已降为低速时，才启动闭环微调
+                bool isAtBrakingTarget = isFinalNode || isAuthorizedSegmentEnd || isNextTurn || isHomeDocking;
+                if (isAtBrakingTarget && projRemaining <= robot.Config.CreepThreshold && robot.LinearVelocity <= 0.25f)
                 {
                     if (projRemaining <= 0.003f)
                     {
@@ -296,8 +351,11 @@ namespace WarehouseGridSimulation.Core.Motion
                     return RobotCommand.Move(stepMove);
                 }
 
-                // 在高速减速阶段或距离尚远时，持续下发至目标中心的完整剩余投影距离，交由底层动力学梯形平滑减速，严禁单步位移截断
-                return RobotCommand.Move(Math.Max(0.01f, projRemaining));
+                // 在高速减速阶段：
+                // 若是因为逼近授权终点减速，下发到达授权终点的实际剩余总物理距离以完整执行动力学梯形减速；
+                // 否则下发当前节点剩余距离。
+                float effectiveBrakingDist = isBrakingForAuthEnd ? Math.Max(0.01f, distToAuthEnd) : Math.Max(0.01f, projRemaining);
+                return RobotCommand.Move(effectiveBrakingDist);
             }
 
             // 5. 直道连续全速巡航：下发延伸到拐弯点或终点的累积距离，避免小车每格误判减速

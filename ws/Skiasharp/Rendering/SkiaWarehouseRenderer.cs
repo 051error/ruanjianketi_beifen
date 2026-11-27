@@ -72,10 +72,13 @@ namespace WarehouseGridSimulation.Skia.Rendering
             ref SKRect statusMinBtnRect,
             float renderFps,
             float interpolationAlpha,
-            int? selectedRobotId = null)
+            int? selectedRobotId = null,
+            double multiElapsedTime = 0.0,
+            int completedTasksCount = 0,
+            double taskEfficiency = 0.0)
         {
             // 使用 SkiaSharp 统一光栅化渲染全场景地图、机群位姿、路径轨迹与双 HUD 仪表盘。
-            // canvas: 渲染目标画布; viewWidth: 视口宽度; viewHeight: 视口高度; map: 仓储网格地图; snapshot: 最新权威状态快照; offsetX: 视口水平平移量; offsetY: 视口垂直平移量; scale: 视口缩放比例; baseCellPixels: 基础单格像素跨度; mode: 当前仿真运行模式; selectedTarget: 单机模式下选中的目标点坐标; showPath: 是否渲染规划路径折线; showTargetLines: 是否绘制目标配对连线; multiTargets: 多机模式下的目标点集合; isViewportHudMinimized: 视口 HUD 卡片是否处于最小化收起状态; isStatusHudMinimized: 状态 HUD 卡片是否处于最小化收起状态; viewportHudRect: 视口 HUD 卡片外框几何矩形引用; statusHudRect: 状态 HUD 卡片外框几何矩形引用; viewportMinBtnRect: 视口折叠按钮矩形引用; statusMinBtnRect: 状态折叠按钮矩形引用; renderFps: 当前界面实时渲染刷新帧率; interpolationAlpha: 渲染位姿插值系数; selectedRobotId: 当前选中受控的机器人全局编号。
+            // canvas: 渲染目标画布; viewWidth: 视口宽度; viewHeight: 视口高度; map: 仓储网格地图; snapshot: 最新权威状态快照; offsetX: 视口水平平移量; offsetY: 视口垂直平移量; scale: 视口缩放比例; baseCellPixels: 基础单格像素跨度; mode: 当前仿真运行模式; selectedTarget: 单机模式下选中的目标点坐标; showPath: 是否渲染规划路径折线; showTargetLines: 是否绘制目标配对连线; multiTargets: 多机模式下的目标点集合; isViewportHudMinimized: 视口 HUD 卡片是否处于最小化收起状态; isStatusHudMinimized: 状态 HUD 卡片是否处于最小化收起状态; viewportHudRect: 视口 HUD 卡片外框几何矩形引用; statusHudRect: 状态 HUD 卡片外框几何矩形引用; viewportMinBtnRect: 视口折叠按钮矩形引用; statusMinBtnRect: 状态折叠按钮矩形引用; renderFps: 当前界面实时渲染刷新帧率; interpolationAlpha: 渲染位姿插值系数; selectedRobotId: 当前选中受控的机器人全局编号; multiElapsedTime: 多机调度累计运行时长秒数; completedTasksCount: 多机模式已完成任务总数; taskEfficiency: 机群每分钟完成任务数锁存效率。
             if (canvas == null) return;
 
             // 1. 背景清屏 (柔和浅色背景)
@@ -153,7 +156,11 @@ namespace WarehouseGridSimulation.Skia.Rendering
                 isStatusHudMinimized,
                 ref statusHudRect,
                 ref statusMinBtnRect,
-                renderFps);
+                renderFps,
+                selectedRobotId,
+                multiElapsedTime,
+                completedTasksCount,
+                taskEfficiency);
         }
 
         private void DrawFloorAndGrid(SKCanvas canvas, GridMap map, float ox, float oy, float cellPixels, float gw, float gh)
@@ -315,8 +322,10 @@ namespace WarehouseGridSimulation.Skia.Rendering
             using (var borderPaint = new SKPaint { Color = new SKColor(140, 40, 200), Style = SKPaintStyle.Stroke, StrokeWidth = 1.5f, IsAntialias = true })
             using (var flagPaint = new SKPaint { Color = new SKColor(140, 40, 200), Style = SKPaintStyle.Fill, IsAntialias = true })
             {
-                foreach (var target in multiTargets)
+                int count = multiTargets.Count;
+                for (int i = 0; i < count; i++)
                 {
+                    var target = multiTargets[i];
                     float cellX = ox + target.X * cellPixels;
                     float cellY = oy + target.Y * cellPixels;
                     canvas.DrawRect(cellX, cellY, cellPixels, cellPixels, fillPaint);
@@ -595,11 +604,18 @@ namespace WarehouseGridSimulation.Skia.Rendering
             bool isMinimized,
             ref SKRect hudRect,
             ref SKRect minBtnRect,
-            float renderFps)
+            float renderFps,
+            int? selectedRobotId,
+            double multiElapsedTime,
+            int completedTasksCount,
+            double taskEfficiency)
         {
-            // 在左下角使用 SkiaSharp 绘制紧凑美观的半透明圆角状态数据表格。
-            float cardWidth = 320f;
-            float cardHeight = isMinimized ? 32f : 176f;
+            // 在左下角使用 SkiaSharp 绘制机群宏观整体状态或单机精细化状态监测数据表格。
+            bool showSingleRobotDetail = (mode == SimulationMode.SingleRobot) || (selectedRobotId.HasValue);
+            float cardWidth = 340f;
+            int rowCount = showSingleRobotDetail ? 4 : 3;
+            float rowH = 22f;
+            float cardHeight = isMinimized ? 32f : (36f + rowCount * rowH + 8f);
             float cardX = 12f;
             float cardY = height - cardHeight - 12f;
             if (cardY < 135f) cardY = 135f;
@@ -610,7 +626,8 @@ namespace WarehouseGridSimulation.Skia.Rendering
             using (var panelPaint = new SKPaint { Color = new SKColor(255, 255, 255, 235), Style = SKPaintStyle.Fill, IsAntialias = true })
             using (var borderPaint = new SKPaint { Color = new SKColor(190, 200, 210), Style = SKPaintStyle.Stroke, StrokeWidth = 1f, IsAntialias = true })
             using (var titlePaint = new SKPaint { Color = new SKColor(25, 40, 55), TextSize = 12.5f, IsAntialias = true, Typeface = YaHeiBoldTypeface })
-            using (var keyPaint = new SKPaint { Color = new SKColor(60, 75, 95), TextSize = 10.8f, IsAntialias = true, Typeface = YaHeiBoldTypeface })
+            using (var tipPaint = new SKPaint { Color = new SKColor(115, 130, 150), TextSize = 10f, IsAntialias = true, Typeface = YaHeiTypeface })
+            using (var keyPaint = new SKPaint { Color = new SKColor(60, 75, 95), TextSize = 10.5f, IsAntialias = true, Typeface = YaHeiBoldTypeface })
             using (var valPaint = new SKPaint { Color = new SKColor(15, 23, 42), TextSize = 10.5f, IsAntialias = true, Typeface = YaHeiTypeface })
             using (var gridLinePaint = new SKPaint { Color = new SKColor(215, 222, 230, 220), Style = SKPaintStyle.Stroke, StrokeWidth = 1f })
             using (var zebraRowPaint = new SKPaint { Color = new SKColor(248, 250, 252, 140), Style = SKPaintStyle.Fill })
@@ -618,45 +635,133 @@ namespace WarehouseGridSimulation.Skia.Rendering
                 canvas.DrawRoundRect(hudRect, 6f, 6f, panelPaint);
                 canvas.DrawRoundRect(hudRect, 6f, 6f, borderPaint);
 
-                string monitorTitle = (mode == SimulationMode.SingleRobot)
-                    ? "机器人实时状态监测 [单机模式]"
-                    : $"多机器人集群状态监测 [{snapshot?.Robots?.Count ?? 0}台]";
-                canvas.DrawText(monitorTitle, cardX + 10f, cardY + 20f, titlePaint);
-
                 DrawMinimizeButton(canvas, minBtnRect, isMinimized);
-                if (isMinimized) return;
 
-                // 内嵌 4 列双键值对表格
                 float tableX = cardX + 8f;
                 float tableY = cardY + 27f;
                 float tableW = cardWidth - 16f;
-                float colKeyW = 46f;
-                float colValW = 106f;
-                float rowH = 21f;
+                float colKeyW = 62f;
+                float colValW = (tableW - colKeyW * 2f) * 0.5f;
 
-                var robot = snapshot?.Robots?.FirstOrDefault();
-                string gxStr = robot != null ? $"{robot.GridPosition.X}, {robot.GridPosition.Y}" : "-";
-                string physStr = robot != null ? $"{robot.Position.X:F2}, {robot.Position.Y:F2}m" : "-";
-                string headingStr = robot != null ? $"{robot.Position.Heading * 180f / Math.PI:F0}°" : "-";
-                string stateStr = (snapshot?.IsDeadlockActive == true) ? "死锁自愈中" : (robot != null ? robot.MotionState.ToString() : "-");
-                string speedStr = robot != null ? $"{robot.LinearVelocity:F2} m/s" : "-";
-                string angularSpeedStr = robot != null ? $"{robot.AngularVelocity * 180f / Math.PI:F0} °/s" : "-";
-                string targetStr = (mode == SimulationMode.SingleRobot)
-                    ? (selectedTarget.HasValue ? $"{selectedTarget.Value.X}, {selectedTarget.Value.Y}" : "未设置")
-                    : $"{multiTargets.Count} 个对角目标";
-                string collisionStr = $"{snapshot?.TotalCollisionCount ?? 0} 次";
+                string[,] rows;
 
-                string[,] rows = new string[6, 4]
+                if (!showSingleRobotDetail)
                 {
-                    { "栅格", gxStr, "物理", physStr },
-                    { "朝向", headingStr, "状态", stateStr },
-                    { "线速", speedStr, "角速", angularSpeedStr },
-                    { "目标", targetStr, "碰撞", collisionStr },
-                    { "时间", $"{snapshot?.SimulationTime ?? 0f:F1} s", "步数", $"{snapshot?.Tick ?? 0}" },
-                    { "帧率", $"{renderFps:F0} FPS", "电量", "100% 良好" }
-                };
+                    // 多机模式：未选中单车，显示整体状态
+                    canvas.DrawText("多机集群整体状态监测", cardX + 10f, cardY + 20f, titlePaint);
+                    if (isMinimized) return;
 
-                for (int r = 0; r < 6; r++)
+                    int robotCount = snapshot?.Robots?.Count ?? 0;
+                    double displayTime = multiElapsedTime > 0.0 ? multiElapsedTime : (snapshot?.SimulationTime ?? 0f);
+                    float avgWait = (snapshot?.Robots != null && snapshot.Robots.Count > 0)
+                        ? snapshot.Robots.Average(r => r.WaitTimeSeconds)
+                        : 0f;
+                    int collisionCount = snapshot?.TotalCollisionCount ?? 0;
+
+                    rows = new string[3, 4]
+                    {
+                        { "机器人数量", $"{robotCount} 台", "运行时间", $"{displayTime:F1} s" },
+                        { "任务完成数", $"{completedTasksCount} 个", "任务效率", $"{taskEfficiency:F1} 个/分" },
+                        { "平均等待时间", $"{avgWait:F1} s", "碰撞次数", $"{collisionCount} 次" }
+                    };
+                }
+                else
+                {
+                    // 选中小车（或单机模式）：显示该机器人的精细化状态
+                    RobotSnapshot robot = null;
+                    if (selectedRobotId.HasValue && snapshot?.Robots != null)
+                    {
+                        robot = snapshot.Robots.FirstOrDefault(r => r.Id == selectedRobotId.Value);
+                    }
+                    robot ??= snapshot?.Robots?.FirstOrDefault();
+
+                    if (mode == SimulationMode.MultiRobot)
+                    {
+                        canvas.DrawText($"机器人 #{robot?.Id ?? 0} 状态监测", cardX + 10f, cardY + 20f, titlePaint);
+                        canvas.DrawText("(点击空白返回整体)", cardX + 130f, cardY + 20f, tipPaint);
+                    }
+                    else
+                    {
+                        canvas.DrawText($"机器人 #{robot?.Id ?? 0} 状态监测 [单机模式]", cardX + 10f, cardY + 20f, titlePaint);
+                    }
+
+                    if (isMinimized) return;
+
+                    string idStr = robot != null ? $"#{robot.Id}" : "-";
+                    string batteryStr = robot != null ? $"{robot.BatteryPercentage:F0}%" : "-";
+                    string posStr = robot != null ? $"({robot.GridPosition.X}, {robot.GridPosition.Y})" : "-";
+                    string speedStr = robot != null ? $"{robot.LinearVelocity:F2} m/s" : "-";
+
+                    string headingStr = "-";
+                    if (robot != null)
+                    {
+                        float headingDeg = (float)(((robot.Position.Heading * 180f / Math.PI) % 360 + 360) % 360);
+                        string headingDir = headingDeg switch
+                        {
+                            >= 315 or < 45 => "东",
+                            >= 45 and < 135 => "南",
+                            >= 135 and < 225 => "西",
+                            _ => "北"
+                        };
+                        headingStr = $"{headingDeg:F0}° ({headingDir})";
+                    }
+
+                    string targetStr = "-";
+                    if (mode == SimulationMode.SingleRobot)
+                    {
+                        targetStr = selectedTarget.HasValue ? $"({selectedTarget.Value.X}, {selectedTarget.Value.Y})" : "未设置";
+                    }
+                    else if (robot != null && snapshot?.Robots != null)
+                    {
+                        int rIdx = -1;
+                        for (int i = 0; i < snapshot.Robots.Count; i++)
+                        {
+                            if (snapshot.Robots[i].Id == robot.Id) { rIdx = i; break; }
+                        }
+                        if (rIdx >= 0 && rIdx < multiTargets.Count)
+                        {
+                            targetStr = $"({multiTargets[rIdx].X}, {multiTargets[rIdx].Y})";
+                        }
+                        else if (robot.TargetGrid.HasValue)
+                        {
+                            targetStr = $"({robot.TargetGrid.Value.X}, {robot.TargetGrid.Value.Y})";
+                        }
+                    }
+
+                    string taskStatusStr;
+                    if (robot == null)
+                    {
+                        taskStatusStr = "-";
+                    }
+                    else if (robot.IsAwaitingAuthorization)
+                    {
+                        taskStatusStr = robot.BlockingRobotId.HasValue
+                            ? $"等待资源 (#{robot.BlockingRobotId.Value})"
+                            : "等待资源";
+                    }
+                    else if (robot.MotionState == RobotMotionState.MovingForward ||
+                             robot.MotionState == RobotMotionState.TurningLeft ||
+                             robot.MotionState == RobotMotionState.TurningRight)
+                    {
+                        taskStatusStr = "任务执行中";
+                    }
+                    else
+                    {
+                        taskStatusStr = "空闲";
+                    }
+
+                    string cargoStr = robot != null ? (robot.HasCargo ? "负载" : "空载") : "-";
+
+                    rows = new string[4, 4]
+                    {
+                        { "机器人ID", idStr, "电量", batteryStr },
+                        { "位置", posStr, "速度", speedStr },
+                        { "朝向", headingStr, "目标位置", targetStr },
+                        { "任务状态", taskStatusStr, "载货状态", cargoStr }
+                    };
+                }
+
+                for (int r = 0; r < rowCount; r++)
                 {
                     float ry = tableY + r * rowH;
                     if (r % 2 == 1)
@@ -670,7 +775,7 @@ namespace WarehouseGridSimulation.Skia.Rendering
                     canvas.DrawText(rows[r, 2], tableX + colKeyW + colValW + 4f, ry + 15f, keyPaint);
                     canvas.DrawText(rows[r, 3], tableX + colKeyW * 2 + colValW + 4f, ry + 15f, valPaint);
                 }
-                canvas.DrawRect(tableX, tableY, tableW, rowH * 6, gridLinePaint);
+                canvas.DrawRect(tableX, tableY, tableW, rowH * rowCount, gridLinePaint);
             }
         }
     }

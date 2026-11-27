@@ -23,6 +23,8 @@ namespace WarehouseGridSimulation.Core.Engine
         public GridPoint? TargetGrid { get; init; }
         public bool IsAwaitingAuthorization { get; init; }
         public float WaitTimeSeconds { get; init; }
+        public float BatteryPercentage { get; init; } = 100f;
+        public int? BlockingRobotId { get; init; }
     }
 
     public class TaskSnapshot
@@ -47,6 +49,7 @@ namespace WarehouseGridSimulation.Core.Engine
     {
         public long Tick { get; init; }
         public float SimulationTime { get; init; }
+        public double WallClockTimeSeconds { get; init; }
         public bool IsRunning { get; init; }
         public bool IsPaused { get; init; }
         public int TotalCollisionCount { get; init; }

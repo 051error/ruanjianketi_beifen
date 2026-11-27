@@ -679,27 +679,36 @@ namespace WarehouseGridSimulation.Tests
             Assert.IsTrue(rejectReason.Contains("占用"));
         }
 
-        // 场景 20：扫码进入新地标中心原子交接与原资源释放
+        // 场景 20：扫码进入新地标中心原子交接与三格移动闭塞延迟释放
         [TestMethod]
         public void Scenario20_LandmarkConfirmationAtomicHandoverAndRelease()
         {
-            // 验证机器人中心传感器对齐新地标后原子化确立新占用并彻底释放原栅格和边。
+            // 验证机器人中心传感器对齐新地标后确立新占用并保持原栅格延迟保护，直到进一步对准第二新地标时才释放原栅格和边。
             var manager = new GridReservationManager();
             var startGrid = new GridPoint(4, 4);
             var nextGrid = new GridPoint(5, 4);
+            var thirdGrid = new GridPoint(6, 4);
 
             manager.RegisterRobotInitialGrid(1, startGrid);
             manager.TryAcquireStepAuthorization(1, startGrid, nextGrid, out _);
 
-            // 扫码确认：机器人 ConfirmedGrid 变为 nextGrid
+            // 1. 扫码确认进入 nextGrid：确立新占用，同时身后 startGrid 保持延迟保护锁定以防追尾
             manager.UpdateOccupancyAndRelease(1, startGrid, nextGrid, nextGrid);
 
             Assert.IsTrue(manager.OccupiedGrids.ContainsKey(nextGrid), "新地标必须成为正式物理占用");
-            Assert.IsFalse(manager.OccupiedGrids.ContainsKey(startGrid), "原栅格必须已被安全释放");
+            Assert.IsTrue(manager.OccupiedGrids.ContainsKey(startGrid), "三格闭塞下身后的原栅格必须保持延迟保护锁定");
             Assert.IsFalse(manager.ReservedGrids.ContainsKey(nextGrid), "预约池中已无该目标");
 
+            // 2. 扫码确认进一步进入第三地标 thirdGrid：此时 startGrid 终于安全释放
+            manager.TryAcquireStepAuthorization(1, nextGrid, thirdGrid, out _);
+            manager.UpdateOccupancyAndRelease(1, nextGrid, thirdGrid, thirdGrid);
+
+            Assert.IsTrue(manager.OccupiedGrids.ContainsKey(thirdGrid), "第三地标成为正式物理占用");
+            Assert.IsTrue(manager.OccupiedGrids.ContainsKey(nextGrid), "nextGrid 保持延迟保护锁定");
+            Assert.IsFalse(manager.OccupiedGrids.ContainsKey(startGrid), "进一步对准新地标后原栅格 startGrid 必须已被安全释放");
+
             long edgeKey = GridReservationManager.GetUndirectedEdgeKey(startGrid, nextGrid);
-            Assert.IsFalse(manager.ReservedEdges.ContainsKey(edgeKey), "通道无向边已被彻底释放");
+            Assert.IsFalse(manager.ReservedEdges.ContainsKey(edgeKey), "更早的历史通道边已被彻底释放");
         }
 
         // 场景 21：重新设置目标点后旧目标点与未走路径资源被彻底释放
@@ -1494,6 +1503,677 @@ namespace WarehouseGridSimulation.Tests
             bool victimBreakLogged = engine.LatestSnapshot.LogEvents.Any(l => l.Contains("外围单车破环成功"));
             Assert.IsTrue(victimBreakLogged, "必须成功触发并执行外围单车破环重规划");
             Assert.AreEqual(0, engine.CollisionDetector.TotalCollisionCount, "破环全流程绝不发生碰撞事故");
+        }
+
+        // 场景 39：验证三格移动闭塞延迟一格安全释放机制杜绝尾部侵入追尾
+        [TestMethod]
+        public void Scenario39_ThreeGridBlockDelayedReleasePreventsRearEndCollision()
+        {
+            // 验证当小车 A 确认进入新地标 G2 时身后 G1 保持占用锁定，唯有 A 确认进入 G3 时 G1 才正式释放。
+            // resMgr: 交通预约管理器; g1..g4: 直线航道栅格。
+            var resMgr = new GridReservationManager();
+            var g1 = new GridPoint(2, 5);
+            var g2 = new GridPoint(3, 5);
+            var g3 = new GridPoint(4, 5);
+            var g4 = new GridPoint(5, 5);
+
+            resMgr.RegisterRobotInitialGrid(1, g1);
+            resMgr.RegisterRobotInitialGrid(2, new GridPoint(1, 5));
+
+            // 小车 1 申请并确认进入 G2
+            Assert.IsTrue(resMgr.TryAcquireStepAuthorization(1, g1, g2, out _));
+            resMgr.UpdateOccupancyAndRelease(1, g1, g2, g2);
+
+            // 关键断言：此时小车 1 刚到 G2，身后 G1 必须依然被小车 1 牢牢锁定 (三格闭塞延迟释放)
+            Assert.IsTrue(resMgr.OccupiedGrids.ContainsKey(g1), "G1 在小车 1 刚到 G2 时必须继续被 1 号车占用锁定");
+            Assert.AreEqual(1, resMgr.OccupiedGrids[g1]);
+            Assert.IsFalse(resMgr.CanEnterGrid(2, g1, out string blockReason), "后方 2 号车此时尝试申请 G1 必须被拒绝");
+            Assert.IsTrue(blockReason.Contains("占用"));
+
+            // 小车 1 进一步申请并确认进入 G3
+            Assert.IsTrue(resMgr.TryAcquireStepAuthorization(1, g2, g3, out _));
+            resMgr.UpdateOccupancyAndRelease(1, g2, g3, g3);
+
+            // 关键断言：当小车 1 进一步对准 G3 之后，G1 终于安全释放允许 2 号车进入，而 G2 继续被保护
+            Assert.IsFalse(resMgr.OccupiedGrids.ContainsKey(g1), "小车 1 进入 G3 后 G1 终于安全释放");
+            Assert.IsTrue(resMgr.OccupiedGrids.ContainsKey(g2), "小车 1 处于 G3 时身后的 G2 依然处于延迟保护锁定中");
+            Assert.IsTrue(resMgr.CanEnterGrid(2, g1, out _), "2 号车此时可合法安全进入已彻底腾空的 G1");
+        }
+
+        // 场景 40：验证高速巡航时动力学提前制动绝不冲出授权终点
+        [TestMethod]
+        public void Scenario40_DynamicStoppingDistanceBrakingPreventsOvershoot()
+        {
+            // 验证小车全速行进时根据制动滑行距离提前制动，停稳时物理中心严格停在授权终点以内。
+            // map: 仓储地图; robot: 仿真实体; controller: 运动控制器。
+            var map = new GridMap(20, 20, 0.55f);
+            var robot = new SimulatedRobot(1, new GridPoint(2, 5), 0f, 0.55f);
+            var controller = new MotionController(1);
+
+            // 路径为 (2,5) -> (3,5) -> (4,5) -> (5,5) -> (6,5) -> (7,5)，但只授权到 (5,5) (Index=3)
+            var path = new List<GridPoint>
+            {
+                new GridPoint(2, 5),
+                new GridPoint(3, 5),
+                new GridPoint(4, 5),
+                new GridPoint(5, 5),
+                new GridPoint(6, 5),
+                new GridPoint(7, 5)
+            };
+
+            controller.SetPath(path, initialAuthorizedIndex: 3);
+
+            float dt = 0.1f;
+            float cellSize = 0.55f;
+
+            for (int i = 0; i < 60; i++)
+            {
+                var cmd = controller.ComputeNextCommand(robot, cellSize, dt);
+                robot.ExecuteCommand(cmd);
+                robot.Step(dt, cellSize);
+            }
+
+            // 验证小车已停稳
+            Assert.AreEqual(0f, robot.LinearVelocity, 1e-3f, "小车应完全停稳");
+            float maxAllowedX = (5.5f * cellSize) + 0.01f;
+            Assert.IsTrue(robot.Position.X <= maxAllowedX, $"小车物理横坐标 {robot.Position.X:F3}m 绝不能滑出授权终点 (5,5) 的几何中心 {5.5f * cellSize:F3}m");
+        }
+
+        // 场景 41：验证三格闭塞模式二 (ReleaseAllExceptDestinationOnArrival) 到达目标点后释放除当前终点外的所有资源
+        [TestMethod]
+        public void Scenario41_ThreeGridDelayReleaseMode_ReleaseAllExceptDestinationOnArrival()
+        {
+            // 验证小车到达目标点停稳后释放身后上一栅格占用并仅保留终点占用以腾空通行资源。
+            var resMgr = new GridReservationManager
+            {
+                DelayReleaseMode = ThreeGridDelayReleaseMode.ReleaseAllExceptDestinationOnArrival
+            };
+            var g1 = new GridPoint(10, 10);
+            var g2 = new GridPoint(11, 10);
+            var g3 = new GridPoint(12, 10);
+
+            resMgr.RegisterRobotInitialGrid(1, g1);
+            resMgr.RegisterRobotInitialGrid(2, new GridPoint(9, 10));
+
+            // 小车 1 申请并从 g1 移动到 g2
+            Assert.IsTrue(resMgr.TryAcquireStepAuthorization(1, g1, g2, out _));
+            resMgr.UpdateOccupancyAndRelease(1, g1, g2, g2);
+
+            // 小车 1 进一步申请并到达最终目标点 g3
+            Assert.IsTrue(resMgr.TryAcquireStepAuthorization(1, g2, g3, out _));
+            resMgr.UpdateOccupancyAndRelease(1, g2, g3, g3);
+
+            // 到达 g3 触发前，按照三格闭塞延迟释放，g2 仍处于保护锁定状态
+            Assert.IsTrue(resMgr.OccupiedGrids.ContainsKey(g2), "到达终点但未执行到站结算前 g2 仍处于三格闭塞延迟保护");
+
+            // 触发到达目标点结算
+            resMgr.OnDestinationReached(1, g3);
+
+            // 验证：当前终点 g3 保持占用，但身后的上一栅格 g2 已被彻底释放，2 号车可顺利申请 g2
+            Assert.IsTrue(resMgr.OccupiedGrids.ContainsKey(g3), "终点 g3 必须保留 1 号小车的物理占用");
+            Assert.IsFalse(resMgr.OccupiedGrids.ContainsKey(g2), "到达终点后身后上一栅格 g2 必须已被彻底释放");
+            Assert.IsFalse(resMgr.OccupiedGrids.ContainsKey(g1), "历史栅格 g1 不得残留占用");
+            Assert.IsTrue(resMgr.CanEnterGrid(2, g2, out _), "后方 2 号小车现在可以顺利申请并驶入已腾空的 g2 栅格");
+        }
+
+        // 场景 42：验证三格闭塞模式一 (RetainPreviousGridOnDestination) 到达目标点后保留上一栅格资源供 LMAPF 使用
+        [TestMethod]
+        public void Scenario42_ThreeGridDelayReleaseMode_RetainPreviousGridOnDestination()
+        {
+            // 验证在 LMAPF 模式下小车到达目标点后不释放上一栅格资源并继续保持双重闭塞占用。
+            var resMgr = new GridReservationManager
+            {
+                DelayReleaseMode = ThreeGridDelayReleaseMode.RetainPreviousGridOnDestination
+            };
+            var g1 = new GridPoint(10, 10);
+            var g2 = new GridPoint(11, 10);
+            var g3 = new GridPoint(12, 10);
+
+            resMgr.RegisterRobotInitialGrid(1, g1);
+            resMgr.RegisterRobotInitialGrid(2, new GridPoint(9, 10));
+
+            // 小车 1 移动至 g2 后再到达终点 g3
+            Assert.IsTrue(resMgr.TryAcquireStepAuthorization(1, g1, g2, out _));
+            resMgr.UpdateOccupancyAndRelease(1, g1, g2, g2);
+
+            Assert.IsTrue(resMgr.TryAcquireStepAuthorization(1, g2, g3, out _));
+            resMgr.UpdateOccupancyAndRelease(1, g2, g3, g3);
+
+            // 触发到达目标点结算
+            resMgr.OnDestinationReached(1, g3);
+
+            // 验证：在 RetainPreviousGridOnDestination 模式下，身后的上一栅格 g2 持续被锁定占用
+            Assert.IsTrue(resMgr.OccupiedGrids.ContainsKey(g3), "终点 g3 处于物理占用状态");
+            Assert.IsTrue(resMgr.OccupiedGrids.ContainsKey(g2), "供 LMAPF 场景使用的模式下一栅格 g2 必须持续被保持占用");
+            Assert.IsFalse(resMgr.CanEnterGrid(2, g2, out string blockReason), "后方 2 号小车尝试申请 g2 必须被阻挡拒绝");
+            Assert.IsTrue(blockReason.Contains("占用"));
+        }
+
+        // 场景 43：验证机器人正常原地转向动作绝不被误判为死锁停滞
+        [TestMethod]
+        public void Scenario43_InPlaceRotationNotMisdiagnosedAsStalled()
+        {
+            // 验证小车在执行原地自旋时由于处于合法转向状态绝不会被死锁检测误判为停滞候选车。
+            var map = new GridMap(10, 10, 0.55f);
+            var resMgr = new GridReservationManager();
+            var dlMgr = new DeadlockManager { StallThresholdSeconds = 1.0 };
+            var robot = new SimulatedRobot(1, new GridPoint(3, 3), 0f, 0.55f);
+            var controller = new MotionController(1);
+
+            // 设定一条需要拐弯的路径 (3,3) -> (3,4) (即朝下方转向 90 度)
+            var path = new List<GridPoint> { new GridPoint(3, 3), new GridPoint(3, 4) };
+            controller.SetPath(path, initialAuthorizedIndex: 1);
+            resMgr.RegisterRobotInitialGrid(1, new GridPoint(3, 3));
+
+            // 模拟小车在原地进行角速度旋转，持续 1.2 秒 (超过 1.0s 阈值)
+            float simTime = 0f;
+            float dt = 0.1f;
+            for (int i = 0; i < 12; i++)
+            {
+                simTime += dt;
+                var cmd = controller.ComputeNextCommand(robot, 0.55f, dt);
+                robot.ExecuteCommand(cmd);
+                robot.Step(dt, 0.55f);
+
+                // 在旋转进行中调用诊断
+                var report = dlMgr.Diagnose(new[] { robot }, resMgr, map, simTime, id => controller);
+                Assert.AreEqual(DeadlockStatus.Normal, report.Status, "正在原地旋转的小车绝不可被判定为死锁或停滞状态");
+            }
+        }
+
+        // 场景 44：验证在途小车受阻于停泊小车时精准诊断为 StationaryBlockage 并触发动态自主绕障
+        [TestMethod]
+        public void Scenario44_StationaryBlockageTriggersDynamicRerouting()
+        {
+            // 验证当在途小车被前方已停泊小车阻挡时系统识别静态车位阻挡并成功触发单车自主绕障。
+            var engine = new SimulationEngine(new GridMap(10, 10, 0.55f));
+            engine.DeadlockManager.StallThresholdSeconds = 0.5;
+
+            // 前车 1 停滞在 (3, 3)，后车 2 位于 (2, 3)，均尝试前往同一通道
+            var r1 = new SimulatedRobot(1, new GridPoint(3, 3), 0f, 0.55f);
+            var r2 = new SimulatedRobot(2, new GridPoint(2, 3), 0f, 0.55f);
+            engine.AddRobot(r1);
+            engine.AddRobot(r2);
+
+            engine.ReservationManager.RegisterRobotInitialGrid(1, new GridPoint(3, 3));
+            engine.ReservationManager.RegisterRobotInitialGrid(2, new GridPoint(2, 3));
+
+            // 小车 1 为已到站停泊车停留在 (3,3)，小车 2 想要通过 (3,3) 到达 (5,3)
+            var mc1 = engine.GetMotionController(1);
+            var mc2 = engine.GetMotionController(2);
+            mc1.SetPath(new List<GridPoint> { new GridPoint(3, 3) }, initialAuthorizedIndex: 0);
+            mc2.SetPath(new List<GridPoint> { new GridPoint(2, 3), new GridPoint(3, 3), new GridPoint(4, 3), new GridPoint(5, 3) }, initialAuthorizedIndex: 0);
+
+            // 模拟推进直到触发静态车位阻挡动态绕障
+            for (int i = 0; i < 20; i++)
+            {
+                engine.StepSingleTick();
+            }
+
+            // 验证：后方 2 号小车成功触发应急单车自主绕障重规划，新路径绝不再穿过前车卡住的 (3,3)
+            Assert.IsTrue(mc2.HasPath, "2 号小车必须已重新规划避障路径");
+            bool pathPassesThroughBlocked = mc2.CurrentPath.Contains(new GridPoint(3, 3));
+            Assert.IsFalse(pathPassesThroughBlocked, "2 号小车的新绕行路径必须彻底绕开卡住的 (3,3) 网格");
+        }
+
+        // 场景 45：验证死锁重规划时提取的动态障碍物确保新路径绝对不穿越被锁定的死锁栅格
+        [TestMethod]
+        public void Scenario45_ReplanningPathStrictlyAvoidsLockedGrids()
+        {
+            // 验证重规划障碍物提取方法能够精准包含全部已被锁定的物理栅格以保证重规划路线实现真正绕行。
+            var engine = new SimulationEngine(new GridMap(10, 10, 0.55f));
+            var r1 = new SimulatedRobot(1, new GridPoint(4, 4), 0f, 0.55f);
+            var r2 = new SimulatedRobot(2, new GridPoint(4, 5), 0f, 0.55f);
+            engine.AddRobot(r1);
+            engine.AddRobot(r2);
+
+            engine.ReservationManager.RegisterRobotInitialGrid(1, new GridPoint(4, 4));
+            engine.ReservationManager.RegisterRobotInitialGrid(2, new GridPoint(4, 5));
+
+            // 获取为 1 号车重规划时的动态障碍物
+            var dynamicObstacles = engine.GetDynamicObstaclesForReplanning(1);
+
+            // 验证：2 号车占有的物理网格 (4,5) 必须被无遗漏地列入动态硬障碍物集合
+            Assert.IsTrue(dynamicObstacles.Contains(new GridPoint(4, 5)), "2 号车占有的栅格 (4,5) 必须被严格列为动态不可通行障碍物");
+
+            // 1 号车规划到达 (4, 6) 的路线
+            var planResult = engine.PathPlanner.PlanPath(engine.Map, new GridPoint(4, 4), new GridPoint(4, 6), pt => pt != new GridPoint(4, 6) && dynamicObstacles.Contains(pt));
+            Assert.IsTrue(planResult.Success, "必须能寻得一条绕开 (4,5) 的可行路径");
+            Assert.IsFalse(planResult.Path.Contains(new GridPoint(4, 5)), "规划出来的绕行新路径绝对不可经过被锁定的 (4,5) 网格");
+        }
+
+        // 场景 46：验证局部死锁重规划无解时系统自动级联升级至 Tier 3 全局协同重规划
+        [TestMethod]
+        public void Scenario46_Tier3GlobalReplanningUnlocksDenseDeadlock()
+        {
+            // 验证当死锁环局部解空间枯竭时系统自动触发全图全量协同重规划并成功解冻机群。
+            var engine = new SimulationEngine(new GridMap(10, 10, 0.55f));
+            engine.Config.GlobalReplanningCooldownSeconds = 0f;
+
+            var r1 = new SimulatedRobot(1, new GridPoint(4, 4), 0f, 0.55f);
+            var r2 = new SimulatedRobot(2, new GridPoint(5, 4), 0f, 0.55f);
+            engine.AddRobot(r1);
+            engine.AddRobot(r2);
+
+            engine.ReservationManager.RegisterRobotInitialGrid(1, new GridPoint(4, 4));
+            engine.ReservationManager.RegisterRobotInitialGrid(2, new GridPoint(5, 4));
+
+            // 小车 1 目标为 (7, 4)，小车 2 目标为 (2, 4)
+            var mc1 = engine.GetMotionController(1);
+            var mc2 = engine.GetMotionController(2);
+            mc1.SetPath(new List<GridPoint> { new GridPoint(4, 4), new GridPoint(5, 4), new GridPoint(6, 4), new GridPoint(7, 4) }, initialAuthorizedIndex: 0);
+            mc2.SetPath(new List<GridPoint> { new GridPoint(5, 4), new GridPoint(4, 4), new GridPoint(3, 4), new GridPoint(2, 4) }, initialAuthorizedIndex: 0);
+
+            // 直接执行 Tier 3 全局协同自愈重规划
+            bool globalSuccess = engine.TryResolveDeadlockByGlobalReplanning();
+            Assert.IsTrue(globalSuccess, "全局协同自愈必须成功触发异步规划");
+
+            // 等待异步后台任务求解完成并处理引擎排队命令
+            for (int i = 0; i < 30; i++)
+            {
+                Thread.Sleep(20);
+                engine.ProcessPendingCommands();
+                if (mc1.CurrentPath.Count > 0 && mc1.CurrentPath[^1] == new GridPoint(7, 4) &&
+                    mc2.CurrentPath.Count > 0 && mc2.CurrentPath[^1] == new GridPoint(2, 4))
+                {
+                    break;
+                }
+            }
+
+            Assert.IsTrue(mc1.HasPath && mc1.CurrentPath.Count > 0, "1 号小车必须已获得全局协同新路径");
+            Assert.IsTrue(mc2.HasPath && mc2.CurrentPath.Count > 0, "2 号小车必须已获得全局协同新路径");
+            Assert.AreEqual(new GridPoint(7, 4), mc1.CurrentPath[^1], "1 号小车新路径终点保持原导航目标不变");
+            Assert.AreEqual(new GridPoint(2, 4), mc2.CurrentPath[^1], "2 号小车新路径终点保持原导航目标不变");
+        }
+
+        // 场景 47：验证动力学梯形减速严格单调递减直至为0，低速末段绝不反弹加速
+        [TestMethod]
+        public void Scenario47_KinematicBrakingIsStrictlyMonotonicWithoutSpeedBounce()
+        {
+            // 验证小车在制动减速全流程中线速度严格单调递减直至平稳停稳。
+            var robot = new SimulatedRobot(1, new GridPoint(0, 0), 0f, 0.55f);
+
+            // 1. 先让小车前进加速至巡航高速度
+            robot.ExecuteCommand(RobotCommand.Move(5.0f));
+            float dt = 0.1f;
+            for (int i = 0; i < 10; i++)
+            {
+                robot.Step(dt, 0.55f);
+            }
+
+            Assert.IsTrue(robot.LinearVelocity >= 1.0f, "小车应已加速至巡航高速度");
+
+            // 2. 模拟进入制动滑行区间：下发极短剩余距离使其立刻处于制动滑行区
+            robot.ExecuteCommand(RobotCommand.Move(0.1f));
+
+            float prevSpeed = robot.LinearVelocity;
+            bool hasStartedDecelerating = false;
+
+            for (int i = 0; i < 20; i++)
+            {
+                robot.Step(dt, 0.55f);
+                float curSpeed = robot.LinearVelocity;
+
+                if (curSpeed < prevSpeed)
+                {
+                    hasStartedDecelerating = true;
+                }
+
+                if (hasStartedDecelerating)
+                {
+                    Assert.IsTrue(curSpeed <= prevSpeed + 1e-4f, $"小车一旦进入减速阶段速度绝不可反弹上升 (当前速度 {curSpeed:F3} > 前一帧速度 {prevSpeed:F3})");
+                }
+
+                prevSpeed = curSpeed;
+                if (curSpeed == 0f) break;
+            }
+
+            Assert.IsTrue(hasStartedDecelerating, "小车必须经历减速过程");
+            Assert.AreEqual(0f, robot.LinearVelocity, 1e-3f, "小车必须最终平稳停稳");
+        }
+
+        // 场景 48：验证全速巡航高速逼近授权终点平滑制动绝不冲出授权终点引发碰撞
+        [TestMethod]
+        public void Scenario48_HighSpeedCruiseBrakingAtAuthorizedEndPreventsCollision()
+        {
+            // 验证小车全速行进时根据授权终点总物理距离提前平滑减速且绝不冲撞前方下一网格的静止小车。
+            var engine = new SimulationEngine(new GridMap(20, 20, 0.55f), new SimulationConfig
+            {
+                AutoReplanningOnDeadlock = false
+            });
+
+            // 小车 1 从 (2, 5) 驶向 (5, 5)，但只授权至 (5, 5)
+            // 前方下一格 (6, 5) 停有小车 2
+            var r1 = new SimulatedRobot(1, new GridPoint(2, 5), 0f, 0.55f);
+            var r2 = new SimulatedRobot(2, new GridPoint(6, 5), 0f, 0.55f);
+            engine.AddRobot(r1);
+            engine.AddRobot(r2);
+
+            engine.ReservationManager.RegisterRobotInitialGrid(1, new GridPoint(2, 5));
+            engine.ReservationManager.RegisterRobotInitialGrid(2, new GridPoint(6, 5));
+
+            var mc1 = engine.GetMotionController(1);
+            var path = new List<GridPoint>
+            {
+                new GridPoint(2, 5),
+                new GridPoint(3, 5),
+                new GridPoint(4, 5),
+                new GridPoint(5, 5),
+                new GridPoint(6, 5),
+                new GridPoint(7, 5)
+            };
+
+            // 授权终点严格为 (5,5) (Index = 3)
+            mc1.SetPath(path, initialAuthorizedIndex: 3);
+
+            // 推进 60 步 (6 秒)
+            for (int i = 0; i < 60; i++)
+            {
+                engine.StepSingleTick();
+            }
+
+            // 验证：小车 1 停稳在 (5,5) 网格几何中心以内
+            Assert.AreEqual(0f, r1.LinearVelocity, 1e-3f, "1 号小车应已在授权终点停稳");
+            float maxAllowedX = (5.5f * 0.55f) + 0.01f;
+            Assert.IsTrue(r1.Position.X <= maxAllowedX, $"1 号小车物理横坐标 {r1.Position.X:F3}m 绝不可冲出授权终点中心 {5.5f * 0.55f:F3}m");
+
+            // 验证两车中心距离与碰撞
+            float centerDist = r1.Position.DistanceTo(r2.Position);
+            Assert.IsTrue(centerDist >= 0.50f, $"两车中心物理距离 {centerDist:F3}m 必须保持在安全阈值 0.50m 以上");
+            Assert.AreEqual(0, engine.CollisionDetector.TotalCollisionCount, "全流程绝不发生碰撞事故");
+        }
+
+        // 场景 49：验证仿真引擎内置后台独立工作线程自治推进与一致性快照发布
+        [TestMethod]
+        public void Scenario49_EngineBackgroundWorkerThreadAutonomousAdvancement()
+        {
+            // 验证引擎调用 Start 后后台独立线程自主推进物理时钟并持续原子化发布快照。
+            using var engine = new SimulationEngine(new GridMap(10, 10, 0.55f), new SimulationConfig
+            {
+                FixedDeltaTime = 0.02f, // 采用 20ms 加速步频以便快速单元测试
+                EnableBackgroundWorker = true
+            });
+
+            var r = new SimulatedRobot(1, new GridPoint(1, 1), 0f, 0.55f);
+            engine.AddRobot(r);
+            engine.ReservationManager.RegisterRobotInitialGrid(1, new GridPoint(1, 1));
+
+            long snapshotPublishedCount = 0;
+            engine.SnapshotPublished += s => Interlocked.Increment(ref snapshotPublishedCount);
+
+            // 启动引擎后台工作线程
+            engine.Start();
+
+            // 等待约 150ms，后台独立线程应在无外部主线程驱动下自主推进多步
+            Thread.Sleep(150);
+
+            engine.Pause();
+
+            Assert.IsTrue(engine.Tick > 0, "引擎后台工作线程必须已自主推进若干 Tick");
+            Assert.IsTrue(engine.SimulationTime > 0f, "仿真物理时间必须已由后台线程自主推进");
+            Assert.IsTrue(Interlocked.Read(ref snapshotPublishedCount) > 0, "后台线程必须已持续向外部安全发布最新快照");
+            Assert.IsNotNull(engine.LatestSnapshot, "权威最新快照必须非空");
+        }
+
+        // 场景 50：验证高密度机群在后台工作线程独立驱动下的暂停恢复与安全释放
+        [TestMethod]
+        public void Scenario50_EngineBackgroundWorkerPauseResumeAndDisposeSafety()
+        {
+            // 验证机群在后台工作线程持续推进中经历启动暂停恢复与释放全生命周期无异常死锁。
+            using var engine = new SimulationEngine(new GridMap(10, 10, 0.55f), new SimulationConfig
+            {
+                FixedDeltaTime = 0.02f,
+                EnableBackgroundWorker = true
+            });
+
+            for (int i = 1; i <= 10; i++)
+            {
+                var r = new SimulatedRobot(i, new GridPoint(i - 1, 0), 0f, 0.55f);
+                engine.AddRobot(r);
+                engine.ReservationManager.RegisterRobotInitialGrid(i, new GridPoint(i - 1, 0));
+            }
+
+            engine.Start();
+            Thread.Sleep(50);
+            Assert.IsTrue(engine.IsRunning && !engine.IsPaused);
+
+            // 暂停测试
+            engine.Pause();
+            long tickAtPause = engine.Tick;
+            Thread.Sleep(50);
+            Assert.AreEqual(tickAtPause, engine.Tick, "暂停后后台工作线程必须安全挂起不增加 Tick");
+
+            // 恢复测试
+            engine.Resume();
+            Thread.Sleep(50);
+            Assert.IsTrue(engine.Tick > tickAtPause, "恢复运行后后台工作线程必须继续平稳推进");
+
+            engine.Reset();
+            Assert.AreEqual(0, engine.Tick, "重置后 Tick 必须归零且后台线程安全退出");
+        }
+
+        // 场景 51：验证多机无尽模式对角目标分配、LMAPF延迟释放机制与到站连续航行
+        [TestMethod]
+        public void Scenario51_MultiRobotEndlessModeDiagonalAllocationAndLmapfRetention()
+        {
+            // 验证无尽模式下目标动态分配至对角半区并在 LMAPF 模式下保留上一格安全锁定持续前往新目标。
+            var map = new GridMap(30, 30, 0.55f);
+            var resMgr = new GridReservationManager
+            {
+                DelayReleaseMode = ThreeGridDelayReleaseMode.RetainPreviousGridOnDestination
+            };
+
+            // 1. 小车 1 位于左下象限 (5, 25)
+            var robot = new SimulatedRobot(1, new GridPoint(5, 25), 0f, 0.55f);
+            resMgr.RegisterRobotInitialGrid(1, robot.ConfirmedGrid);
+
+            // 2. 为其生成对角目标点：必须位于右上半区 (X >= 15, Y < 15)
+            var usedTargets = new HashSet<GridPoint>();
+            var diagTarget = DiagonalTargetAllocator.FindDiagonalTarget(map, robot, usedTargets);
+            Assert.IsTrue(diagTarget.X >= 15, $"对角目标横坐标必须位于右上半区 (X={diagTarget.X})");
+            Assert.IsTrue(diagTarget.Y < 15, $"对角目标纵坐标必须位于右上半区 (Y={diagTarget.Y})");
+
+            // 3. 模拟小车移动并到达首个目标点 (18, 5)
+            var gPrev = new GridPoint(17, 5);
+            var gDest = new GridPoint(18, 5);
+            resMgr.RegisterRobotInitialGrid(1, gPrev);
+            resMgr.TryAcquireStepAuthorization(1, gPrev, gDest, out _);
+            resMgr.UpdateOccupancyAndRelease(1, gPrev, gDest, gDest);
+
+            // 到站触发 LMAPF 结算
+            resMgr.OnDestinationReached(1, gDest);
+
+            // 验证 LMAPF 模式下上一栅格持续保持闭塞保护以供下一航段衔接
+            Assert.IsTrue(resMgr.OccupiedGrids.ContainsKey(gDest), "终点网格保持占用");
+            Assert.IsTrue(resMgr.OccupiedGrids.ContainsKey(gPrev), "LMAPF 无尽模式下身后的上一栅格必须持续被保留保护");
+
+            // 4. 小车在 (18, 5) (右上象限) 再次生成下一对角目标：必须翻转至左下半区 (X < 15, Y >= 15)
+            var nextRobot = new SimulatedRobot(1, gDest, 0f, 0.55f);
+            var nextDiagTarget = DiagonalTargetAllocator.FindDiagonalTarget(map, nextRobot, usedTargets);
+            Assert.IsTrue(nextDiagTarget.X < 15, $"新对角目标横坐标必须翻转至左下半区 (X={nextDiagTarget.X})");
+            Assert.IsTrue(nextDiagTarget.Y >= 15, $"新对角目标纵坐标必须翻转至左下半区 (Y={nextDiagTarget.Y})");
+        }
+
+        // 场景 52：验证单台机器人到达目标点即时激发事件并严格沿用多机算法规划新对角目标航段
+        [TestMethod]
+        public void Scenario52_SingleRobotArrivalTriggersInstantEventAndMultiAgentReroute()
+        {
+            // 验证单台机器人到站后无需等待全员到达即可立即激发到站事件并由多机算法生成新时空航段。
+            var engine = new SimulationEngine(new GridMap(30, 30, 0.55f));
+            var r1 = new SimulatedRobot(1, new GridPoint(10, 10), 0f, 0.55f);
+            var r2 = new SimulatedRobot(2, new GridPoint(20, 20), 0f, 0.55f);
+            engine.AddRobot(r1);
+            engine.AddRobot(r2);
+
+            engine.ReservationManager.RegisterRobotInitialGrid(1, new GridPoint(10, 10));
+            engine.ReservationManager.RegisterRobotInitialGrid(2, new GridPoint(20, 20));
+
+            // 小车 1 路径已走完 (到达终点)，小车 2 仍在途中
+            var mc1 = engine.GetMotionController(1);
+            var mc2 = engine.GetMotionController(2);
+            mc1.SetPath(new List<GridPoint> { new GridPoint(10, 10) }, initialAuthorizedIndex: 0);
+            mc2.SetPath(new List<GridPoint> { new GridPoint(20, 20), new GridPoint(21, 20), new GridPoint(22, 20) }, initialAuthorizedIndex: 0);
+
+            SimulatedRobot arrivedRobot = null;
+            GridPoint arrivedPoint = default;
+            engine.RobotDestinationReached += (r, pt) =>
+            {
+                arrivedRobot = r;
+                arrivedPoint = pt;
+            };
+
+            // 推进单步触发到站检测
+            engine.StepSingleTick();
+
+            // 验证：小车 1 到达目标点停稳，单车即时事件成功激发，完全无需等待小车 2
+            Assert.IsNotNull(arrivedRobot, "单台小车到站后必须即时激发 RobotDestinationReached 事件");
+            Assert.AreEqual(1, arrivedRobot.Id, "激发的到站实体必须为小车 1");
+            Assert.AreEqual(new GridPoint(10, 10), arrivedPoint, "激发的到站网格必须为小车 1 终点");
+
+            // 验证使用选定的多机算法 (ECBS) 为该单车规划去新对角目标的时空新航段
+            var planner = MultiAgentPlannerRegistry.Get("ECBS") ?? MultiAgentPlannerRegistry.Default;
+            var newDiagGoal = DiagonalTargetAllocator.FindDiagonalTarget(engine.Map, r1, new HashSet<GridPoint>());
+            var planResult = planner.Plan(engine.Map, new List<AgentTask> { new AgentTask(1, r1.ConfirmedGrid, newDiagGoal) }, new MultiAgentPlanOptions());
+
+            Assert.IsTrue(planResult.Success, "选定的多机算法必须成功为到站单车规划无冲突新航段");
+            Assert.AreEqual(newDiagGoal, planResult.AgentPaths[0][^1], "新航段终点必须严格为新对角目标");
+        }
+
+        // 场景 53：验证统一路径装载模型对偏位小车自动强制归正至当前格几何中心
+        [TestMethod]
+        public void Scenario53_UnifiedPathLoadingForcesCenteringForOffCenterRobots()
+        {
+            // 验证小车在带有横向偏心时装载路径自动将起始目标索引设为0优先归正中心。
+            var engine = new SimulationEngine(new GridMap(20, 20, 0.55f));
+
+            // 小车位于 (5, 5)，但物理坐标人为偏移 3cm (0.03m)
+            float cellSize = 0.55f;
+            float offCenterX = (5.5f * cellSize) + 0.03f;
+            float offCenterY = (5.5f * cellSize) + 0.02f;
+            var robot = new SimulatedRobot(1, offCenterX, offCenterY, 0f, cellSize);
+            engine.AddRobot(robot);
+            engine.ReservationManager.RegisterRobotInitialGrid(1, new GridPoint(5, 5));
+
+            var path = new List<GridPoint> { new GridPoint(5, 5), new GridPoint(6, 5), new GridPoint(7, 5) };
+
+            // 统一调用路径装载接口
+            bool loaded = engine.LoadRobotPathWithCentering(1, path, 0);
+            Assert.IsTrue(loaded);
+
+            var mc = engine.GetMotionController(1);
+            Assert.AreEqual(0, mc.CurrentTargetIndex, "存在偏心的小车必须强制从第 0 格开始归正到几何中心");
+
+            // 推进小车运动直到归正完成
+            for (int i = 0; i < 20; i++)
+            {
+                engine.StepSingleTick();
+                if (mc.CurrentTargetIndex > 0) break;
+            }
+
+            // 验证归正后小车物理中心与 (5,5) 中心距离严格小于 1cm
+            float distToCenter = robot.Position.DistanceTo(5.5f * cellSize, 5.5f * cellSize);
+            Assert.IsTrue(distToCenter <= 0.015f, $"归正完成后物理偏差为 {distToCenter:F4}m，必须收敛至中心 1.5cm 以内");
+        }
+
+        // 场景 54：验证转弯节点严格在几何中心停稳后方可执行原地自旋杜绝扫掠剐蹭
+        [TestMethod]
+        public void Scenario54_TurnNodeRequiresPreciseCenterAlignmentBeforeRotation()
+        {
+            // 验证直角拐弯处小车严格在栅格绝对中心停稳后方才自旋且与邻格小车保持安全阈值。
+            var engine = new SimulationEngine(new GridMap(20, 20, 0.55f));
+
+            // 小车 1 执行直角转弯 (2,5) -> (3,5) -> (3,6)
+            // 邻近格 (4,5) 停有小车 2
+            var r1 = new SimulatedRobot(1, new GridPoint(2, 5), 0f, 0.55f);
+            var r2 = new SimulatedRobot(2, new GridPoint(4, 5), 0f, 0.55f);
+            engine.AddRobot(r1);
+            engine.AddRobot(r2);
+
+            engine.ReservationManager.RegisterRobotInitialGrid(1, new GridPoint(2, 5));
+            engine.ReservationManager.RegisterRobotInitialGrid(2, new GridPoint(4, 5));
+
+            var turnPath = new List<GridPoint> { new GridPoint(2, 5), new GridPoint(3, 5), new GridPoint(3, 6) };
+            engine.LoadRobotPathWithCentering(1, turnPath, 2);
+
+            // 运行并监测小车在拐角点 (3,5) 处自旋全流程的最小两车中心距
+            float minDistance = float.MaxValue;
+            for (int i = 0; i < 50; i++)
+            {
+                engine.StepSingleTick();
+                float dist = r1.Position.DistanceTo(r2.Position);
+                if (dist < minDistance) minDistance = dist;
+            }
+
+            // 验证：两车中心最小距离全程稳定在安全阈值 0.50m 以上，全流程 0 碰撞
+            Assert.IsTrue(minDistance >= 0.50f, $"拐弯全程两车最小中心距 {minDistance:F3}m 必须保持在安全阈值 0.50m 以上");
+            Assert.AreEqual(0, engine.CollisionDetector.TotalCollisionCount, "自旋全流程绝不发生扫出格剐蹭碰撞");
+        }
+
+        // 场景 55：验证非环路长等待时自动触发应急单车自主绕障重规划脱困
+        [TestMethod]
+        public void Scenario55_CascadingLongWaitBlockageTriggersAutonomousRerouting()
+        {
+            // 验证当小车前方被非环路长等待阻塞超过阈值时自动触发单车自主动态避障绕行。
+            var map = new GridMap(20, 20, 0.55f);
+            var engine = new SimulationEngine(map);
+            engine.DeadlockManager.LongWaitThresholdSeconds = 1.0;
+
+            var r1 = new SimulatedRobot(1, new GridPoint(5, 5), 0f, 0.55f);
+            var r2 = new SimulatedRobot(2, new GridPoint(6, 5), 0f, 0.55f);
+            engine.SetRobots(new[] { r1, r2 });
+
+            var mc1 = engine.GetMotionController(1);
+            var mc2 = engine.GetMotionController(2);
+
+            mc1.SetPath(new[] { new GridPoint(5, 5), new GridPoint(6, 5), new GridPoint(7, 5), new GridPoint(8, 5) }, initialAuthorizedIndex: 0);
+            mc2.SetPath(new[] { new GridPoint(6, 5), new GridPoint(6, 6), new GridPoint(6, 7), new GridPoint(6, 8) }, initialAuthorizedIndex: 0);
+
+            engine.Start();
+
+            for (int i = 0; i < 35; i++)
+            {
+                engine.Step();
+            }
+
+            bool longWaitRerouted = engine.LatestSnapshot.LogEvents.Any(l => l.Contains("长等待应急绕障成功"));
+            Assert.IsTrue(longWaitRerouted, "长等待受阻小车必须成功触发单车自主避障绕行");
+        }
+
+        // 场景 56：验证涉事小车急停后不丢失终点目标并自发尝试绕开障碍自愈
+        [TestMethod]
+        public void Scenario56_StopInvolvedRobotPreservesGoalAndAttemptsSelfHealing()
+        {
+            // 验证涉事碰撞小车不丢弃最终导航目标并保留路径自愈能力。
+            var engine = new SimulationEngine(new GridMap(20, 20, 0.55f));
+            var r1 = new SimulatedRobot(1, new GridPoint(5, 5), 0f, 0.55f);
+            engine.SetRobots(new[] { r1 });
+
+            var mc1 = engine.GetMotionController(1);
+            mc1.SetPath(new[] { new GridPoint(5, 5), new GridPoint(6, 5), new GridPoint(7, 5) }, 1);
+
+            // 触发涉事保护机制
+            r1.EmergencyStop();
+            Assert.AreEqual(RobotMotionState.Stopped, r1.MotionState);
+        }
+
+        // 场景 57：验证等待资源时权威快照中能够准确记录阻塞源小车的唯一编号
+        [TestMethod]
+        public void Scenario57_AwaitingAuthorizationSnapshotRecordsBlockingRobotId()
+        {
+            // 验证当小车 1 申请进入被小车 2 占用的网格时快照准确记录阻塞源小车编号为 2。
+            var engine = new SimulationEngine(new GridMap(20, 20, 0.55f));
+            var r1 = new SimulatedRobot(1, new GridPoint(5, 5), 0f, 0.55f);
+            var r2 = new SimulatedRobot(2, new GridPoint(6, 5), 0f, 0.55f);
+            engine.SetRobots(new[] { r1, r2 });
+
+            var mc1 = engine.GetMotionController(1);
+            mc1.SetPath(new[] { new GridPoint(5, 5), new GridPoint(6, 5), new GridPoint(7, 5) }, initialAuthorizedIndex: 0);
+
+            engine.StepSingleTick();
+
+            var snap1 = engine.LatestSnapshot.Robots.FirstOrDefault(r => r.Id == 1);
+            Assert.IsNotNull(snap1);
+            Assert.AreEqual(2, snap1.BlockingRobotId, "小车 1 等待被小车 2 占用的栅格时，BlockingRobotId 必须为 2");
         }
     }
 }

@@ -19,6 +19,7 @@ namespace WarehouseGridSimulation.Core.Robots
         public bool HasCargo { get; set; }
         public int? CurrentTaskId { get; set; }
         public bool HasCollided { get; set; } = false;
+        public float BatteryPercentage { get; set; } = 100f;
 
         public RobotConfig Config { get; }
         public RobotCommand ActiveCommand { get; private set; } = RobotCommand.Stop;
@@ -118,9 +119,9 @@ namespace WarehouseGridSimulation.Core.Robots
 
                 // 梯形减速前瞻：计算以最大减速度刹停所需的制动滑行距离
                 float stoppingDist = (LinearVelocity * LinearVelocity) / (2f * Config.LinearDeceleration);
-                if (RemainingDistance <= stoppingDist && LinearVelocity > 0.3f)
+                if (RemainingDistance <= stoppingDist)
                 {
-                    LinearVelocity = Math.Max(0.2f, LinearVelocity - Config.LinearDeceleration * dt);
+                    LinearVelocity = Math.Max(0f, LinearVelocity - Config.LinearDeceleration * dt);
                 }
                 else
                 {
@@ -153,9 +154,9 @@ namespace WarehouseGridSimulation.Core.Robots
 
                 // 梯形角减速前瞻：计算以最大角减速度刹停所需的制动滑行角位移
                 float stoppingAngle = (curAbsOmega * curAbsOmega) / (2f * Config.AngularDeceleration);
-                if (Math.Abs(RemainingAngle) <= stoppingAngle && curAbsOmega > 0.3f)
+                if (Math.Abs(RemainingAngle) <= stoppingAngle)
                 {
-                    curAbsOmega = Math.Max(0.2f, curAbsOmega - Config.AngularDeceleration * dt);
+                    curAbsOmega = Math.Max(0f, curAbsOmega - Config.AngularDeceleration * dt);
                 }
                 else
                 {

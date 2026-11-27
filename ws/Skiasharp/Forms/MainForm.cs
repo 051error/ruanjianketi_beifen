@@ -40,10 +40,8 @@ namespace WarehouseGridSimulation.Skia.Forms
         private readonly Timer _renderTimer;
         private readonly Stopwatch _stopwatch;
         private double _lastElapsedSeconds;
-        private double _simTimeAccumulator = 0.0;
         private double _lastPaintSeconds = -1.0;
         private double _averageFrameSeconds;
-        private bool _interpolateCurrentStep;
 
         // 手动控制长按状态与受控机器人选择 (按钮与键盘按键完全同步，支持单机与多机点选)
         private int? _selectedRobotId = 1;
@@ -99,6 +97,11 @@ namespace WarehouseGridSimulation.Skia.Forms
             }
             BuildSkiaButtons();
 
+            if (_app?.Engine != null)
+            {
+                _app.Engine.Config.EnableBackgroundWorker = true;
+            }
+
             _stopwatch = Stopwatch.StartNew();
             _lastElapsedSeconds = _stopwatch.Elapsed.TotalSeconds;
 
@@ -125,6 +128,7 @@ namespace WarehouseGridSimulation.Skia.Forms
             {
                 _renderTimer?.Dispose();
                 _renderer?.Dispose();
+                _app?.Dispose();
             }
             base.Dispose(disposing);
         }
@@ -148,7 +152,7 @@ namespace WarehouseGridSimulation.Skia.Forms
                     }
                     _multiRobotPresenter?.GenerateRandomRobots(defaultCount);
                 }
-                _selectedRobotId = _app.Engine?.Robots?.FirstOrDefault()?.Id ?? 1;
+                _selectedRobotId = null;
             }
             else
             {
@@ -172,6 +176,7 @@ namespace WarehouseGridSimulation.Skia.Forms
             // 响应机器人机群数量选择变更。
             if (_cmbRobotCount.SelectedItem is int count)
             {
+                _selectedRobotId = null;
                 _multiRobotPresenter?.GenerateRandomRobots(count);
                 _skiaCanvas?.Invalidate();
             }
@@ -182,6 +187,7 @@ namespace WarehouseGridSimulation.Skia.Forms
             // 响应重新随机生成机群与对角目标点按钮点击。
             int count = 20;
             if (_cmbRobotCount?.SelectedItem is int selCount) count = selCount;
+            _selectedRobotId = null;
             _multiRobotPresenter?.GenerateRandomRobots(count);
             _skiaCanvas?.Invalidate();
         }
@@ -342,7 +348,6 @@ namespace WarehouseGridSimulation.Skia.Forms
             float centerCoordY = (initY + 0.5f) * _app.CurrentMap.CellSizeMeters;
             r.TeleportForReset(new Pose2D(centerCoordX, centerCoordY, -(float)Math.PI * 0.5f));
             _app.Engine.PublishSnapshot();
-            _interpolateCurrentStep = false;
 
             _singleRobotPresenter?.ResetTarget();
             if (_lblTargetInfo != null)
@@ -391,7 +396,6 @@ namespace WarehouseGridSimulation.Skia.Forms
                     }
                     else
                     {
-                        _interpolateCurrentStep = false;
                         _app.Pause();
                     }
                     UpdatePauseResumeButtonText();
@@ -407,7 +411,6 @@ namespace WarehouseGridSimulation.Skia.Forms
             startX += btnWidth + gap;
             _btnStep = new SkiaUiButton("⏭ 单步", new SKRect(startX, btnTop, startX + btnWidth, btnTop + btnHeight), () =>
             {
-                _interpolateCurrentStep = false;
                 _app.Step();
                 UpdatePauseResumeButtonText();
                 _skiaCanvas?.Invalidate();
@@ -421,8 +424,6 @@ namespace WarehouseGridSimulation.Skia.Forms
             startX += btnWidth + gap;
             _btnReset = new SkiaUiButton("↺ 重置", new SKRect(startX, btnTop, startX + btnWidth, btnTop + btnHeight), () =>
             {
-                _interpolateCurrentStep = false;
-                _simTimeAccumulator = 0;
                 _app.Reset();
                 UpdatePauseResumeButtonText();
                 _skiaCanvas?.Invalidate();
@@ -604,41 +605,16 @@ namespace WarehouseGridSimulation.Skia.Forms
 
         private void OnRenderTimerTick(object sender, EventArgs e)
         {
-            // 响应固定帧率渲染定时器并驱动物理步长积分。
+            // 响应固定帧率渲染定时器并刷新 Skia 画布呈现。
             // sender: 触发事件的对象源; e: 定时器事件参数。
             double now = _stopwatch.Elapsed.TotalSeconds;
-            double elapsed = now - _lastElapsedSeconds;
             _lastElapsedSeconds = now;
 
-            if (elapsed > 0.2) elapsed = 0.2; // 避免切后台大卡顿时跳步过多
-
-            // 长按手动驾驶信号持续维持推进
+            // 长按手动驾驶信号持续维持推进 (通过线程安全并发命令队列异步分发)
             int activeId = _selectedRobotId ?? _app.Engine?.Robots?.FirstOrDefault()?.Id ?? 1;
             if (_isManualForwardActive) _app.MaintainManualDrive(activeId, ManualDriveAction.Forward);
             else if (_isManualTurnLeftActive) _app.MaintainManualDrive(activeId, ManualDriveAction.TurnLeft);
             else if (_isManualTurnRightActive) _app.MaintainManualDrive(activeId, ManualDriveAction.TurnRight);
-
-            // 驱动仿真物理时钟步长推进
-            if (_app.Engine != null && _app.Engine.IsRunning && !_app.Engine.IsPaused)
-            {
-                _simTimeAccumulator += elapsed;
-                float fixedDt = _app.Engine.Config.FixedDeltaTime;
-
-                while (_simTimeAccumulator >= fixedDt && !_app.Engine.IsPaused)
-                {
-                    _app.Engine.Step();
-                    _simTimeAccumulator -= fixedDt;
-                    _interpolateCurrentStep = !_app.Engine.IsPaused;
-                    if (_app.Engine.IsPaused)
-                    {
-                        _simTimeAccumulator = 0;
-                    }
-                }
-            }
-            else
-            {
-                _interpolateCurrentStep = false;
-            }
 
             // 状态机与界面控件可用性同步
             if (_currentMode == SimulationMode.SingleRobot)
@@ -670,10 +646,22 @@ namespace WarehouseGridSimulation.Skia.Forms
             }
             _lastPaintSeconds = paintSeconds;
 
-            float interpolationAlpha = _interpolateCurrentStep && snapshot != null &&
-                snapshot.IsRunning && !snapshot.IsPaused
-                ? Math.Clamp((float)(_simTimeAccumulator / _app.Engine.Config.FixedDeltaTime), 0f, 1f)
-                : 1f;
+            float interpolationAlpha = 1f;
+            if (snapshot != null && snapshot.IsRunning && !snapshot.IsPaused)
+            {
+                double currentWallClock = (double)Stopwatch.GetTimestamp() / Stopwatch.Frequency;
+                double timeSinceSnapshot = Math.Max(0.0, currentWallClock - snapshot.WallClockTimeSeconds);
+                float fixedDt = _app.Engine?.Config?.FixedDeltaTime ?? 0.1f;
+                if (fixedDt > 0f)
+                {
+                    interpolationAlpha = (float)Math.Clamp(timeSinceSnapshot / fixedDt, 0.0, 1.0);
+                }
+            }
+
+            double multiElapsedTime = _multiRobotPresenter?.NavElapsedTime ?? 0.0;
+            int completedTasksCount = _multiRobotPresenter?.GetCompletedTasksCount() ?? 0;
+            double taskEfficiency = _multiRobotPresenter?.TaskEfficiencyPerMinute ?? 0.0;
+
             _renderer.Render(
                 canvas,
                 width,
@@ -697,7 +685,10 @@ namespace WarehouseGridSimulation.Skia.Forms
                 ref _viewport.StatusMinBtnRect,
                 _renderFps,
                 interpolationAlpha,
-                _selectedRobotId);
+                _selectedRobotId,
+                multiElapsedTime,
+                completedTasksCount,
+                taskEfficiency);
         }
 
         // ==================== 鼠标事件转发与命中测试 ====================
@@ -758,11 +749,27 @@ namespace WarehouseGridSimulation.Skia.Forms
                 {
                     var clickedGrid = new GridPoint(clickedPoint.X, clickedPoint.Y);
 
-                    // 优先检查是否点选中了某台机器人的当前栅格
-                    var hitRobot = _app.Engine?.Robots?.FirstOrDefault(r => r.ConfirmedGrid == clickedGrid);
+                    // 优先检查是否点选中了某台机器人 (支持栅格确认位置或车体几何范围匹配)
+                    float cellMeters = _app.CurrentMap.CellSizeMeters;
+                    var hitRobot = _app.Engine?.Robots?.FirstOrDefault(r =>
+                    {
+                        if (r.ConfirmedGrid == clickedGrid) return true;
+                        float dx = r.Position.X - (clickedGrid.X + 0.5f) * cellMeters;
+                        float dy = r.Position.Y - (clickedGrid.Y + 0.5f) * cellMeters;
+                        return (dx * dx + dy * dy) <= (cellMeters * cellMeters * 0.36f);
+                    });
+
                     if (hitRobot != null)
                     {
-                        _selectedRobotId = hitRobot.Id;
+                        // 多机模式下若已选中该机器人，再次点击则取消选中并切回机群整体视角
+                        if (_currentMode == SimulationMode.MultiRobot && _selectedRobotId == hitRobot.Id)
+                        {
+                            _selectedRobotId = null;
+                        }
+                        else
+                        {
+                            _selectedRobotId = hitRobot.Id;
+                        }
                         _skiaCanvas?.Invalidate();
                     }
                     else if (_currentMode == SimulationMode.SingleRobot)
@@ -770,6 +777,15 @@ namespace WarehouseGridSimulation.Skia.Forms
                         if (!_app.CurrentMap.IsObstacle(clickedGrid))
                         {
                             _singleRobotPresenter?.OnGridClicked(clickedPoint);
+                            _skiaCanvas?.Invalidate();
+                        }
+                    }
+                    else if (_currentMode == SimulationMode.MultiRobot)
+                    {
+                        // 多机模式下点击空白栅格，取消单车选中，切回机群整体状态监测
+                        if (_selectedRobotId != null)
+                        {
+                            _selectedRobotId = null;
                             _skiaCanvas?.Invalidate();
                         }
                     }
@@ -855,12 +871,9 @@ namespace WarehouseGridSimulation.Skia.Forms
             switch (keyData)
             {
                 case Keys.S:
-                    _interpolateCurrentStep = false;
                     _app.Step();
                     return true;
                 case Keys.R:
-                    _interpolateCurrentStep = false;
-                    _simTimeAccumulator = 0;
                     _app.Reset();
                     return true;
                 case Keys.T:
